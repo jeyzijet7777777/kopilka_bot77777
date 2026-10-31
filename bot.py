@@ -20,6 +20,7 @@ from matplotlib.ticker import FuncFormatter
 import openpyxl
 
 from telegram import (
+    BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputMediaPhoto,
@@ -59,6 +60,7 @@ STATE_PATH = os.environ.get("STATE_PATH", "bot_state.pkl")
 TEMPLATE_PATH = "template.xlsx"
 
 TZ = ZoneInfo(TZ_NAME)
+TZ_LABEL = "МСК" if TZ_NAME == "Europe/Moscow" else TZ_NAME
 MAX_AMOUNT = 10_000_000
 
 logging.basicConfig(
@@ -162,10 +164,25 @@ def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # снимки дневного лимита: прошедшие дни не «пересчитываются» после смены настроек
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS day_limits (
+                user_id INTEGER NOT NULL,
+                day TEXT NOT NULL,
+                daily_limit REAL NOT NULL,
+                PRIMARY KEY (user_id, day)
+            )
+        """)
         # связь «снятие из копилки» <-> трата, чтобы удалять их вместе
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(savings_topups)")]
         if "expense_id" not in cols:
             conn.execute("ALTER TABLE savings_topups ADD COLUMN expense_id INTEGER")
+        # миграция: снятия из копилки больше не дублируются «тратой дня» (она ломала лимит и банк сдачи)
+        conn.execute(
+            "DELETE FROM expenses WHERE id IN "
+            "(SELECT expense_id FROM savings_topups WHERE expense_id IS NOT NULL)"
+        )
+        conn.execute("UPDATE savings_topups SET expense_id = NULL WHERE expense_id IS NOT NULL")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_exp_user_date ON expenses(user_id, spent_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_top_user_date ON savings_topups(user_id, topup_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mand_user ON mandatory(user_id)")
@@ -180,7 +197,12 @@ def get_setting(user_id: int, key: str, default=None):
         return row["value"] if row else default
 
 
+LIMIT_KEYS = {"daily_income", "income_mode", "save", "custom_days_in_month"}
+
+
 def set_setting(user_id: int, key: str, value):
+    if key in LIMIT_KEYS:
+        freeze_past_limits(user_id)  # прошлые дни остаются при старом лимите
     with db() as conn:
         conn.execute(
             "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) "
@@ -212,19 +234,45 @@ def cap(s: str) -> str:
     return s[:1].upper() + s[1:]
 
 
+_CURRENCY_TAIL_RE = re.compile(r"(?:₽|руб\.?|р\.?|rub)$", re.IGNORECASE)
+_AMOUNT_RE = re.compile(r"\d+(?:\.\d+)?")
+_THOUSANDS_COMMA_RE = re.compile(r"\d{1,3}(?:,\d{3})+")
+
+
 def parse_amount(s: str, allow_zero: bool = False):
-    """Число из строки или None. Отсекает inf/nan, отрицательные и слишком большие."""
-    try:
-        v = float(
-            s.replace(" ", "").replace("\u00a0", "").replace(",", ".").replace("₽", "")
-        )
-    except (ValueError, AttributeError):
+    """Число из строки или None: «1500», «1 500», «1,000», «300₽», «1500р», «10,5».
+    Отсекает inf/nan, экспоненту, отрицательные и слишком большие."""
+    if not isinstance(s, str):
         return None
-    if not math.isfinite(v) or v > MAX_AMOUNT or v < 0:
+    t = s.replace("\u00a0", "").replace(" ", "").replace("₽", "")
+    t = _CURRENCY_TAIL_RE.sub("", t)
+    if _THOUSANDS_COMMA_RE.fullmatch(t):
+        t = t.replace(",", "")
+    else:
+        t = t.replace(",", ".")
+    if not _AMOUNT_RE.fullmatch(t):
+        return None
+    v = float(t)
+    if not math.isfinite(v) or v > MAX_AMOUNT:
         return None
     if v == 0 and not allow_zero:
         return None
     return v
+
+
+def merge_thousands(tokens):
+    """«1 500 такси» -> «1500 такси»: склеивает группы цифр, разделённые пробелом."""
+    out = []
+    for tok in tokens:
+        if (
+            out
+            and re.fullmatch(r"\d{3}(?:[.,]\d{1,2})?", tok)
+            and re.fullmatch(r"\d{1,3}(?:\d{3})*", out[-1])
+        ):
+            out[-1] += tok
+        else:
+            out.append(tok)
+    return out
 
 
 def parse_time(text: str):
@@ -295,16 +343,45 @@ def get_budget_info(user_id: int, ref_date: datetime.date = None):
             (user_id,),
         ).fetchall()
         topup_row = conn.execute(
-            "SELECT SUM(amount) AS total FROM savings_topups WHERE user_id = ? AND topup_date LIKE ?",
+            "SELECT SUM(amount) AS total FROM savings_topups "
+            "WHERE user_id = ? AND topup_date LIKE ? AND amount > 0",
             (user_id, month_prefix + "%"),
+        ).fetchone()
+        all_topups_row = conn.execute(
+            "SELECT SUM(amount) AS total FROM savings_topups WHERE user_id = ? AND topup_date <= ?",
+            (user_id, ref_date.isoformat()),
         ).fetchone()
 
     topups_total = topup_row["total"] if topup_row and topup_row["total"] else 0.0
+    all_topups = all_topups_row["total"] if all_topups_row and all_topups_row["total"] else 0.0
+    # накопленная копилка: плановые отчисления за каждый месяц с начала учёта + все пополнения/снятия
+    try:
+        start_d = datetime.date.fromisoformat(get_setting(user_id, "start_date") or "")
+    except ValueError:
+        start_d = ref_date
+    n_months = max(0, (ref_date.year - start_d.year) * 12 + ref_date.month - start_d.month + 1)
+    piggy_total = save_advance * n_months + all_topups
     total_save_effective = save_advance + topups_total
 
     mandatory_total = sum(r["amount"] for r in mand_rows)
     available = income - mandatory_total - total_save_effective
-    daily_limit = available / days_in_month if days_in_month else 0.0
+    limit_base = available / days_in_month if days_in_month else 0.0
+
+    with db() as conn:
+        snap_rows = conn.execute(
+            "SELECT day, daily_limit FROM day_limits WHERE user_id = ? AND day LIKE ?",
+            (user_id, month_prefix + "%"),
+        ).fetchall()
+    limit_snaps = {int(r["day"][-2:]): r["daily_limit"] for r in snap_rows}
+    first_counted_day = 1
+    try:
+        sd = datetime.date.fromisoformat(get_setting(user_id, "start_date") or "")
+        if (sd.year, sd.month) == (ref_date.year, ref_date.month):
+            first_counted_day = sd.day
+    except ValueError:
+        pass
+    series = _month_limit_series(limit_base, days_in_month, limit_snaps, first_counted_day, ref_date.day)
+    daily_limit = series.get(ref_date.day, max(0.0, limit_base))
 
     return {
         "raw_income": raw_income,
@@ -314,6 +391,7 @@ def get_budget_info(user_id: int, ref_date: datetime.date = None):
         "save": save_advance,
         "topups_total": topups_total,
         "total_save_effective": total_save_effective,
+        "piggy_total": piggy_total,
         "mandatory_list": mand_rows,
         "mandatory_total": mandatory_total,
         "days_in_month": days_in_month,
@@ -321,7 +399,86 @@ def get_budget_info(user_id: int, ref_date: datetime.date = None):
         "is_custom_days": bool(custom_days),
         "available": available,
         "daily_limit": max(0.0, daily_limit),
+        "limit_base": limit_base,
+        "limit_snaps": limit_snaps,
+        "first_counted_day": first_counted_day,
     }
+
+
+def _month_limit_series(base: float, n: int, snaps: dict, first_day: int, last_day: int) -> dict:
+    """Лимит по каждому дню месяца. Дни со снимком держат старый лимит, остальные
+    делят оставшийся бюджет поровну: так смена настроек посреди месяца не меняет прошлое,
+    а сумма лимитов за месяц по-прежнему равна «доход − обязательные − копилка»."""
+    out, delta = {}, 0.0
+    for dn in range(first_day, last_day + 1):
+        if dn in snaps:
+            lim = snaps[dn]
+        else:
+            lim = max(0.0, base - delta / max(1, n - (dn - 1)))
+        out[dn] = lim
+        delta += lim - base
+    return out
+
+
+def limits_between(user_id: int, start: datetime.date, end: datetime.date) -> dict:
+    """{дата: лимит} для диапазона дат (дни до начала учёта в результат не попадают)."""
+    out = {}
+    cur = start.replace(day=1)
+    while cur <= end:
+        last_dn = calendar.monthrange(cur.year, cur.month)[1]
+        info = get_budget_info(user_id, cur)
+        series = _month_limit_series(
+            info["limit_base"], info["days_in_month"], info["limit_snaps"],
+            info["first_counted_day"], last_dn,
+        )
+        for dn, lim in series.items():
+            out[datetime.date(cur.year, cur.month, dn)] = lim
+        cur = (cur.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    return {d: v for d, v in out.items() if start <= d <= end}
+
+
+def freeze_past_limits(user_id: int):
+    """Фиксирует лимит всех прошедших дней. Вызывается ПЕРЕД любым изменением,
+    влияющим на лимит (доход, копилка, обязательные расходы, число дней)."""
+    raw = get_setting(user_id, "start_date")
+    if not raw or get_setting(user_id, "daily_income") is None:
+        return  # бюджет ещё не настроен — фиксировать нечего (иначе заморозится лимит по умолчанию)
+    try:
+        start = datetime.date.fromisoformat(raw)
+    except ValueError:
+        return
+    yesterday = today_date() - datetime.timedelta(days=1)
+    if start > yesterday:
+        return
+    lims = limits_between(user_id, start, yesterday)
+    with db() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO day_limits (user_id, day, daily_limit) VALUES (?, ?, ?)",
+            [(user_id, d.isoformat(), v) for d, v in lims.items()],
+        )
+
+
+def month_limits(user_id: int, today: datetime.date, start: datetime.date) -> dict:
+    """{номер дня: лимит} от начала учёта до конца текущего месяца."""
+    real_days = calendar.monthrange(today.year, today.month)[1]
+    lims = limits_between(user_id, start, datetime.date(today.year, today.month, real_days))
+    return {d.day: v for d, v in lims.items()}
+
+
+def upsert_mandatory(user_id: int, name: str, amount: float) -> bool:
+    """Добавляет обязательный расход; расход с тем же названием обновляет. True, если обновлён."""
+    freeze_past_limits(user_id)
+    with db() as conn:
+        rows = conn.execute("SELECT id, name FROM mandatory WHERE user_id = ?", (user_id,)).fetchall()
+        for r in rows:
+            if r["name"].strip().lower() == name.strip().lower():
+                conn.execute("UPDATE mandatory SET amount = ? WHERE id = ?", (amount, r["id"]))
+                return True
+        conn.execute(
+            "INSERT INTO mandatory (user_id, name, amount) VALUES (?, ?, ?)",
+            (user_id, name, amount),
+        )
+    return False
 
 
 def calc_change_pool(user_id: int, through_date: datetime.date) -> float:
@@ -329,7 +486,7 @@ def calc_change_pool(user_id: int, through_date: datetime.date) -> float:
     period_start = get_period_start(user_id, through_date)
     if period_start > through_date:
         return 0.0
-    limit = get_budget_info(user_id, through_date)["daily_limit"]
+    total_limit = sum(limits_between(user_id, period_start, through_date).values())
     with db() as conn:
         row = conn.execute(
             "SELECT SUM(amount) AS total FROM expenses "
@@ -337,8 +494,7 @@ def calc_change_pool(user_id: int, through_date: datetime.date) -> float:
             (user_id, period_start.isoformat(), through_date.isoformat()),
         ).fetchone()
     spent = row["total"] or 0.0
-    days = (through_date - period_start).days + 1
-    return limit * days - spent
+    return total_limit - spent
 
 
 def delete_expense(user_id: int, exp_id: int):
@@ -359,7 +515,7 @@ def delete_expense(user_id: int, exp_id: int):
 
 
 # --- Экспорт в Excel ---
-def update_excel_file(user_id: int, target_month: datetime.date = None) -> str:
+def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.BytesIO:
     if target_month is None:
         target_month = today_date()
 
@@ -378,6 +534,8 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> str:
     ws["B4"] = datetime.datetime(first_day.year, first_day.month, 1)
     ws["B5"] = info["income"]
     ws["B20"] = info["total_save_effective"]
+    if info["is_custom_days"]:
+        ws["B23"] = info["days_in_month"]  # иначе Excel делит на реальные дни и расходится с ботом
 
     for row_idx in range(8, 18):
         ws[f"A{row_idx}"] = None
@@ -414,6 +572,7 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> str:
         d_num = int(r["spent_date"].split("-")[2])
         by_day.setdefault(d_num, []).append((r["amount"], r["category"]))
 
+    lims = limits_between(user_id, first_day, datetime.date(first_day.year, first_day.month, real_days))
     t_today = today_date()
     try:
         start_d = datetime.date.fromisoformat(get_setting(user_id, "start_date", t_today.isoformat()))
@@ -423,6 +582,8 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> str:
     for day_num in range(1, real_days + 1):
         cur_date = datetime.date(first_day.year, first_day.month, day_num)
         row_idx = 5 + day_num
+        if day_num <= info["days_in_month"]:
+            ws[f"F{row_idx}"] = round(lims.get(cur_date, info["daily_limit"]), 2)
         if day_num in by_day:
             items = by_day[day_num]
             ws[f"G{row_idx}"] = sum(x[0] for x in items)
@@ -433,9 +594,10 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> str:
             ws[f"G{row_idx}"] = 0
             ws[f"H{row_idx}"] = "Без трат"
 
-    user_export_path = f"Бюджет_{user_id}.xlsx"
-    wb.save(user_export_path)
-    return user_export_path
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
 
 
 # --- Клавиатуры ---
@@ -484,9 +646,10 @@ def settings_inline_kb(user_id: int):
         [InlineKeyboardButton(f"🏦 Доход: {fmt_money(info['raw_income'])} ({mode_label})", callback_data="set_daily_income")],
         [InlineKeyboardButton("🔄 Изменить график получения дохода", callback_data="set_income_mode")],
         [InlineKeyboardButton(f"📅 Дней в месяце: {days_label}", callback_data="set_days_count")],
-        [InlineKeyboardButton(f"⏰ Время отчёта МСК (сейчас {reminder_time})", callback_data="set_reminder_time")],
+        [InlineKeyboardButton(f"⏰ Время отчёта, {TZ_LABEL} (сейчас {reminder_time})", callback_data="set_reminder_time")],
         [InlineKeyboardButton(f"📈 График в вечернем отчёте: {'вкл' if chart_on else 'выкл'}", callback_data="toggle_report_chart")],
         [InlineKeyboardButton("💰 Плановая копилка", callback_data="set_save")],
+        [InlineKeyboardButton("🏦 История копилки", callback_data="piggy_history")],
         [
             InlineKeyboardButton("➕ Добавить обяз. расход", callback_data="add_mand"),
             InlineKeyboardButton("🗑 Удалить обяз. расход", callback_data="del_mand_menu"),
@@ -511,9 +674,10 @@ def build_settings_text(user_id: int) -> str:
         "⚙️ *Настройки бюджета (🏦 Умная модель)*\n\n"
         f"🏦 *Доход:* {fmt_money(info['raw_income'])} ({info['display_income_text']})\n"
         f"📅 *Дней в месяце:* {info['days_in_month']} ({days_mode})\n"
-        f"⏰ *Вечерний авто-отчёт:* в {reminder_time} по МСК\n"
+        f"⏰ *Вечерний авто-отчёт:* в {reminder_time} ({TZ_LABEL})\n"
         f"🏠 *Обязательные расходы ({fmt_money(info['mandatory_total'])}):*\n{mand_block}\n\n"
         f"💰 *Плановая копилка:* {fmt_money(info['save'])}{topup_str}\n"
+        f"🏦 *Копилка (всего накоплено):* {fmt_money(info['piggy_total'])}\n"
         f"🎯 *Чистый лимит на день:* *{fmt_money(info['daily_limit'])}*\n"
     )
     if info["available"] < 0:
@@ -570,7 +734,7 @@ def build_day_report(user_id: int, target_date: datetime.date):
         f"{status_line}\n\n"
         f"{advice}\n\n"
         f"🪙 *Банк сдачи:* {fmt_money(change_pool)}\n"
-        f"💰 *Плановая копилка:* {fmt_money(info['total_save_effective'])}"
+        f"💰 *Копилка (всего):* {fmt_money(info['piggy_total'])}"
     )
     if info["available"] < 0:
         text += (
@@ -607,7 +771,7 @@ def _make_date(d: int, m: int, y: int):
 
 def parse_expense_message(text: str):
     """«450 продукты», «такси 300 вчера», «450 кофе 28.10». Возвращает (сумма, категория, дата)."""
-    tokens = text.strip().split()
+    tokens = merge_thousands(text.strip().split())
     if not tokens:
         return None
 
@@ -630,7 +794,15 @@ def parse_expense_message(text: str):
 
     def short_date(tok):
         m = DATE_SHORT_RE.match(tok)
-        return _make_date(int(m.group(1)), int(m.group(2)), base.year) if m else None
+        if not m:
+            return None
+        dt = _make_date(int(m.group(1)), int(m.group(2)), base.year)
+        if dt and dt > base:
+            dt = _make_date(int(m.group(1)), int(m.group(2)), base.year - 1)
+        # «1.5» в «2 молоко 1.5» — скорее число, чем дата многомесячной давности
+        if dt and 0 <= (base - dt).days <= 45:
+            return dt
+        return None
 
     # «10.5» это дата, только если в сообщении есть ещё и обычная сумма; иначе это 10,5 ₽
     if any(parse_amount(t) is not None and short_date(t) is None for t in rest):
@@ -662,7 +834,7 @@ def parse_expense_message(text: str):
 
 def parse_label_amount(text: str):
     """«Аренда 15000». Возвращает (сумма, название) без разбора дат."""
-    tokens = text.strip().split()
+    tokens = merge_thousands(text.strip().split())
     if not tokens:
         return None
     first = parse_amount(tokens[0])
@@ -678,7 +850,7 @@ def parse_label_amount(text: str):
 
 def parse_amount_comment(text: str, default_comment: str):
     """«500 Подработка». Возвращает (сумма, комментарий) или None."""
-    tokens = text.strip().split()
+    tokens = merge_thousands(text.strip().split())
     if not tokens:
         return None
     amount = parse_amount(tokens[0])
@@ -734,12 +906,14 @@ def chart_overview(user_id: int) -> io.BytesIO:
     limit = info["daily_limit"]
     days = list(range(start.day, today.day + 1)) or [today.day]
     spent = [by_day.get(d, 0.0) for d in days]
+    lm = month_limits(user_id, today, start)
+    lim_d = [lm.get(d, limit) for d in days]
 
     fig = Figure(figsize=(8, 6.4))
     ax1, ax2 = fig.subplots(2, 1)
 
-    ax1.bar(days, spent, color=[RED if s > limit else BLUE for s in spent], width=0.7)
-    ax1.axhline(limit, color=GREEN, linestyle="--", linewidth=2)
+    ax1.bar(days, spent, color=[RED if s > l else BLUE for s, l in zip(spent, lim_d)], width=0.7)
+    ax1.step(days, lim_d, where="mid", color=GREEN, linestyle="--", linewidth=2)
     ax1.set_title("Траты по дням и дневной лимит, ₽", fontsize=11, fontweight="bold", loc="left")
     ax1.legend(
         handles=[
@@ -757,8 +931,8 @@ def chart_overview(user_id: int) -> io.BytesIO:
     _xticks(ax1, days)
 
     cum, run = [], 0.0
-    for s in spent:
-        run += limit - s
+    for s, l in zip(spent, lim_d):
+        run += l - s
         cum.append(run)
     ax2.axhline(0, color=GRAY, linewidth=1)
     ax2.fill_between(days, cum, 0, where=[c >= 0 for c in cum], color=GREEN, alpha=0.18, interpolate=True)
@@ -782,6 +956,7 @@ def chart_calendar(user_id: int) -> io.BytesIO:
     limit = info["daily_limit"]
     weeks = calendar.monthcalendar(today.year, today.month)
     n = len(weeks)
+    lm = month_limits(user_id, today, start)
 
     fig = Figure(figsize=(7.6, 2.0 + 0.95 * n))
     ax = fig.add_subplot(111)
@@ -801,12 +976,13 @@ def chart_calendar(user_id: int) -> io.BytesIO:
             dt = datetime.date(today.year, today.month, d)
             label = ""
             if start <= dt <= today:
-                diff = limit - by_day.get(d, 0.0)
+                lim_d = lm.get(d, limit)
+                diff = lim_d - by_day.get(d, 0.0)
                 active_days += 1
                 saved += diff
                 if diff >= 0:
                     ok_days += 1
-                intensity = min(abs(diff) / limit, 1.0) if limit > 0 else 1.0
+                intensity = min(abs(diff) / lim_d, 1.0) if lim_d > 0 else 1.0
                 face = to_rgba(GREEN_D if diff >= 0 else RED, 0.22 + 0.55 * intensity)
                 label = f"{'+' if diff >= 0 else '−'}{fmt_num(abs(diff))}"
             else:
@@ -824,7 +1000,7 @@ def chart_calendar(user_id: int) -> io.BytesIO:
                         fontsize=10, fontweight="bold", color=INK)
 
     streak, cur = 0, today
-    while cur >= start and by_day.get(cur.day, 0.0) <= limit:
+    while cur >= start and by_day.get(cur.day, 0.0) <= lm.get(cur.day, limit):
         streak += 1
         cur -= datetime.timedelta(days=1)
 
@@ -847,7 +1023,11 @@ def chart_forecast(user_id: int) -> io.BytesIO:
     limit = info["daily_limit"]
     horizon = max(info["days_in_month"], today.day)
     days_all = list(range(start.day, horizon + 1)) or [today.day]
-    limit_line = [limit * (d - start.day + 1) for d in days_all]
+    lm = month_limits(user_id, today, start)
+    limit_line, acc = [], 0.0
+    for d in days_all:
+        acc += lm.get(d, limit)
+        limit_line.append(acc)
 
     fact_days = list(range(start.day, today.day + 1)) or [today.day]
     cum, run = [], 0.0
@@ -1049,32 +1229,49 @@ async def daily_reminder_job(context: ContextTypes.DEFAULT_TYPE):
         parsed = parse_time(get_setting(uid, "reminder_time", "21:00") or "21:00") or (21, 0)
         target_min = parsed[0] * 60 + parsed[1]
 
-        # окно в час после целевого времени и не более одного отчёта в сутки
-        if not (0 <= now_min - target_min < 60):
+        # отчёт уходит после целевого времени, если в этот день ещё не отправлялся
+        # (так он придёт и после простоя бота, а не потеряется)
+        if now_min < target_min:
             continue
         if get_setting(uid, "last_report") == t_date.isoformat():
             continue
-        set_setting(uid, "last_report", t_date.isoformat())
+        if get_setting(uid, "blocked") == "1":
+            continue
 
-        text, markup = build_day_report(uid, t_date)
-        header = "⏰ *Ваш автоматический вечерний отчёт за день!*\n\n"
+        sent = False
         try:
+            text, markup = build_day_report(uid, t_date)
+            header = "⏰ *Ваш автоматический вечерний отчёт за день!*\n\n"
             await context.bot.send_message(
                 chat_id=uid,
                 text=header + text,
                 parse_mode="Markdown",
                 reply_markup=markup or MAIN_KB,
             )
+            sent = True
+            set_setting(uid, "last_report", t_date.isoformat())  # только после успешной отправки
             logger.info("Вечерний отчёт отправлен пользователю %s", uid)
-            if get_setting(uid, "report_chart", "1") == "1":
+        except Forbidden:
+            logger.info("Пользователь %s заблокировал бота — отчёты приостановлены", uid)
+            set_setting(uid, "last_report", t_date.isoformat())
+            set_setting(uid, "blocked", "1")
+        except Exception as e:
+            fails = context.application.bot_data.setdefault("report_fails", {})
+            day, cnt = fails.get(uid, (None, 0))
+            cnt = cnt + 1 if day == t_date.isoformat() else 1
+            fails[uid] = (t_date.isoformat(), cnt)
+            logger.error("Не удалось отправить отчёт пользователю %s (попытка %s): %s", uid, cnt, e)
+            if cnt >= 5:  # не долбим бесконечно
+                set_setting(uid, "last_report", t_date.isoformat())
+
+        if sent and get_setting(uid, "report_chart", "1") == "1":
+            try:
                 buf = await asyncio.to_thread(build_chart, "overview", uid)
                 await context.bot.send_photo(
                     chat_id=uid, photo=buf, caption=CHARTS["overview"][1], reply_markup=chart_kb()
                 )
-        except Forbidden:
-            logger.info("Пользователь %s заблокировал бота", uid)
-        except Exception as e:
-            logger.error("Не удалось отправить отчёт пользователю %s: %s", uid, e)
+            except Exception as e:
+                logger.error("Не удалось отправить график пользователю %s: %s", uid, e)
         await asyncio.sleep(0.05)
 
 
@@ -1082,6 +1279,8 @@ async def daily_reminder_job(context: ContextTypes.DEFAULT_TYPE):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     ensure_start_day(user_id)
+    if get_setting(user_id, "blocked") == "1":
+        set_setting(user_id, "blocked", "0")
     context.user_data.clear()
     context.user_data["wizard_step"] = "wizard_mode"
     welcome = (
@@ -1118,6 +1317,7 @@ async def show_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     end_d = today_date()
     start_d = end_d - datetime.timedelta(days=6)
     info = get_budget_info(user_id, end_d)
+    lims = limits_between(user_id, start_d, end_d)
     with db() as conn:
         rows = conn.execute(
             "SELECT spent_date, SUM(amount) AS total FROM expenses "
@@ -1132,7 +1332,7 @@ async def show_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = start_d + datetime.timedelta(days=i)
         sp = by_day.get(cur.isoformat(), 0.0)
         total_week += sp
-        diff = info["daily_limit"] - sp
+        diff = lims.get(cur, info["daily_limit"]) - sp
         icon = "🟢" if diff >= 0 else "🔴"
         lines.append(f"{icon} *{cur.strftime('%d.%m')}*: {fmt_money(sp)} (остаток: {fmt_money(diff)})")
 
@@ -1180,7 +1380,7 @@ async def show_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines.append(f"\n💸 *Всего потрачено (с учётом обязательных):* *{fmt_money(total_spent)}*")
     lines.append(f"🪙 *Банк сдачи:* {fmt_money(change_pool)}")
-    lines.append(f"💰 *Плановая копилка:* {fmt_money(info['total_save_effective'])}")
+    lines.append(f"💰 *Копилка (всего):* {fmt_money(info['piggy_total'])}")
 
     if top_rows:
         lines.append("\n🏆 *Топ-5 категорий расходов:*")
@@ -1197,36 +1397,162 @@ async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     try:
-        path = await asyncio.to_thread(update_excel_file, user_id)
-        with open(path, "rb") as f:
-            await update.message.reply_document(
-                document=f,
-                filename=f"Бюджет_{today_date().strftime('%m_%Y')}.xlsx",
-                caption="📥 Ваша персональная таблица бюджета с деталями трат",
-                reply_markup=MAIN_KB,
-            )
-    except Exception as e:
+        buf = await asyncio.to_thread(update_excel_file, user_id)
+        await update.message.reply_document(
+            document=buf,
+            filename=f"Бюджет_{today_date().strftime('%m_%Y')}.xlsx",
+            caption="📥 Ваша персональная таблица бюджета с деталями трат",
+            reply_markup=MAIN_KB,
+        )
+    except Exception:
         logger.exception("Ошибка при формировании Excel:")
-        await update.message.reply_text(f"⚠️ Не удалось сформировать Excel: {e}", reply_markup=MAIN_KB)
+        await update.message.reply_text("⚠️ Не удалось сформировать Excel. Попробуйте позже.", reply_markup=MAIN_KB)
 
 
 async def undo_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     with db() as conn:
-        row = conn.execute(
-            "SELECT id, amount, category, spent_date FROM expenses WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+        exp = conn.execute(
+            "SELECT id, amount, category, spent_date, created_at FROM expenses "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 1",
             (user_id,),
         ).fetchone()
-    if not row:
-        await update.message.reply_text("Трат для отмены пока нет.", reply_markup=MAIN_KB)
+        top = conn.execute(
+            "SELECT id, amount, comment, topup_date, created_at FROM savings_topups "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    if not exp and not top:
+        await update.message.reply_text("Операций для отмены пока нет.", reply_markup=MAIN_KB)
         return
 
-    delete_expense(user_id, row["id"])
+    if top and (not exp or (top["created_at"] or "") >= (exp["created_at"] or "")):
+        freeze_past_limits(user_id)
+        with db() as conn:
+            conn.execute("DELETE FROM savings_topups WHERE id = ? AND user_id = ?", (top["id"], user_id))
+        sign = "+" if top["amount"] >= 0 else "−"
+        await update.message.reply_text(
+            f"↩️ Отменена операция с копилкой: *{sign}{fmt_money(abs(top['amount']))}* "
+            f"({esc(top['comment'])}, {top['topup_date']})",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KB,
+        )
+        return
+
+    delete_expense(user_id, exp["id"])
     await update.message.reply_text(
-        f"↩️ Удалена последняя трата: *{fmt_money(row['amount'])}* ({esc(row['category'])}, {row['spent_date']})",
+        f"↩️ Удалена последняя трата: *{fmt_money(exp['amount'])}* ({esc(exp['category'])}, {exp['spent_date']})",
         parse_mode="Markdown",
         reply_markup=MAIN_KB,
     )
+
+
+def build_history(user_id: int):
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, spent_date, amount, category FROM expenses WHERE user_id = ? "
+            "ORDER BY spent_date DESC, id DESC LIMIT 12",
+            (user_id,),
+        ).fetchall()
+    if not rows:
+        return "Трат пока нет. Запишите первую, например: `450 продукты`.", None
+    lines = ["🧾 *Последние траты* (нажмите, чтобы удалить):", ""]
+    buttons = []
+    for r in rows:
+        d = datetime.date.fromisoformat(r["spent_date"]).strftime("%d.%m")
+        lines.append(f"• {d} — *{fmt_money(r['amount'])}* {esc(r['category'])}")
+        title = f"❌ {d} {int(r['amount'])}₽ {r['category']}"
+        buttons.append([InlineKeyboardButton(title[:40], callback_data=f"hdelexp_{r['id']}")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, markup = build_history(update.effective_user.id)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+
+
+def piggy_undo_kb(topup_id: int):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Отменить", callback_data=f"deltop_{topup_id}")]])
+
+
+def build_piggy_history(user_id: int):
+    info = get_budget_info(user_id)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT id, topup_date, amount, comment FROM savings_topups "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
+            (user_id,),
+        ).fetchall()
+    lines = [
+        f"🏦 *Копилка (всего):* {fmt_money(info['piggy_total'])}",
+        f"_Плановые отчисления: {fmt_money(info['save'])} в месяц_",
+        "",
+    ]
+    buttons = []
+    if rows:
+        lines.append("*Последние операции* (нажмите, чтобы отменить):")
+        for r in rows:
+            d = datetime.date.fromisoformat(r["topup_date"]).strftime("%d.%m")
+            sign = "+" if r["amount"] >= 0 else "−"
+            lines.append(f"• {d} {sign}{fmt_money(abs(r['amount']))} — {esc(r['comment'])}")
+            title = f"❌ {d} {sign}{int(abs(r['amount']))}₽ {r['comment']}"
+            buttons.append([InlineKeyboardButton(title[:40], callback_data=f"hdeltop_{r['id']}")])
+    else:
+        lines.append("_Операций пока нет. Пополнить: кнопка «🏦 В копилку» или `+500`._")
+    return "\n".join(lines), InlineKeyboardMarkup(buttons) if buttons else None
+
+
+async def show_piggy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text, markup = build_piggy_history(update.effective_user.id)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+
+
+async def piggy_add(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, amount: float, comment: str):
+    freeze_past_limits(user_id)
+    with db() as conn:
+        tid = conn.execute(
+            "INSERT INTO savings_topups (user_id, topup_date, amount, comment) VALUES (?, ?, ?, ?)",
+            (user_id, today_date().isoformat(), amount, comment),
+        ).lastrowid
+    context.user_data.clear()
+    info = get_budget_info(user_id)
+    await update.message.reply_text(
+        f"💰 В копилку зачислено: *+{fmt_money(amount)}* ({esc(comment)})!\n"
+        f"🏦 Всего в копилке: *{fmt_money(info['piggy_total'])}*\n"
+        f"_Лимит на сегодня и дальше: {fmt_money(info['daily_limit'])} (прошлые дни не менялись)._",
+        parse_mode="Markdown",
+        reply_markup=piggy_undo_kb(tid),
+    )
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "ℹ️ *Как пользоваться*\n\n"
+        "Трата: `450 продукты`, `такси 300 вчера`, `1 500 одежда 28.10`\n"
+        "Пополнить копилку: `+500 подработка`\n"
+        "Снять из копилки — кнопка «💸 Из копилки» (на дневной лимит не влияет)\n\n"
+        "Команды: /today /week /month /history /chart /excel /piggy /settings /undo /cancel",
+        parse_mode="Markdown",
+        reply_markup=MAIN_KB,
+    )
+
+
+async def post_init(app):
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("today", "Траты за сегодня"),
+            BotCommand("week", "Траты за 7 дней"),
+            BotCommand("month", "Сводка за месяц"),
+            BotCommand("history", "Последние траты"),
+            BotCommand("chart", "График"),
+            BotCommand("excel", "Скачать Excel"),
+            BotCommand("piggy", "Копилка и её история"),
+            BotCommand("settings", "Настройки"),
+            BotCommand("undo", "Отменить последнюю операцию"),
+            BotCommand("help", "Как вводить траты"),
+        ])
+    except TelegramError:
+        logger.warning("Не удалось установить меню команд")
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -1286,6 +1612,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.execute("DELETE FROM mandatory WHERE user_id = ?", (user_id,))
             conn.execute("DELETE FROM expenses WHERE user_id = ?", (user_id,))
             conn.execute("DELETE FROM savings_topups WHERE user_id = ?", (user_id,))
+            conn.execute("DELETE FROM day_limits WHERE user_id = ?", (user_id,))
         context.user_data.clear()
         context.user_data["wizard_step"] = "wizard_mode"
         await query.message.edit_text(
@@ -1345,7 +1672,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "set_reminder_time":
         context.user_data["state"] = "wait_reminder_time"
         await query.message.reply_text(
-            "⏰ Введите время по МСК для вечернего отчёта (формат `ЧЧ:ММ`, например: `21:30`):",
+            f"⏰ Введите время ({TZ_LABEL}) для вечернего отчёта (формат `ЧЧ:ММ`, например: `21:30`):",
             parse_mode="Markdown",
         )
 
@@ -1382,6 +1709,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mand_id = int(data.split("_")[1])
         except (ValueError, IndexError):
             return
+        freeze_past_limits(user_id)
         with db() as conn:
             conn.execute("DELETE FROM mandatory WHERE id = ? AND user_id = ?", (mand_id, user_id))
         await refresh_settings(query, user_id, "✅ Обязательный расход удалён!\n\n")
@@ -1395,13 +1723,55 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=mode_markup("wiz_mode_"),
         )
 
+    elif data.startswith("hdelexp_"):
+        try:
+            exp_id = int(data.split("_")[1])
+        except (ValueError, IndexError):
+            return
+        delete_expense(user_id, exp_id)
+        text, markup = build_history(user_id)
+        try:
+            await query.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+        except TelegramError:
+            pass
+
+    elif data == "piggy_history":
+        text, markup = build_piggy_history(user_id)
+        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+
+    elif data.startswith("deltop_") or data.startswith("hdeltop_"):
+        try:
+            tid = int(data.split("_")[1])
+        except (ValueError, IndexError):
+            return
+        freeze_past_limits(user_id)
+        with db() as conn:
+            deleted = conn.execute(
+                "DELETE FROM savings_topups WHERE id = ? AND user_id = ?", (tid, user_id)
+            ).rowcount
+        if data.startswith("hdeltop_"):
+            text, markup = build_piggy_history(user_id)
+            try:
+                await query.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+            except TelegramError:
+                pass
+        else:
+            msg = "↩️ Операция с копилкой отменена." if deleted else "ℹ️ Эта операция уже отменена."
+            try:
+                await query.message.edit_text(msg)
+            except TelegramError:
+                pass
+
     elif data.startswith("delexp_"):
         try:
             exp_id = int(data.split("_")[1])
         except (ValueError, IndexError):
             return
         spent_date_str = delete_expense(user_id, exp_id)
-        target_d = datetime.date.fromisoformat(spent_date_str) if spent_date_str else today_date()
+        if not spent_date_str:
+            await query.message.reply_text("ℹ️ Эта трата уже удалена.")
+            return
+        target_d = datetime.date.fromisoformat(spent_date_str)
         text, markup = build_day_report(user_id, target_d)
         try:
             await query.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
@@ -1413,6 +1783,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     user_id = update.effective_user.id
+    if get_setting(user_id, "blocked") == "1":
+        set_setting(user_id, "blocked", "0")
 
     # нажатие кнопки меню всегда прерывает незавершённый ввод
     if text in MENU_TEXTS:
@@ -1457,14 +1829,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                     return
                 amount, name = parsed
-                with db() as conn:
-                    conn.execute(
-                        "INSERT INTO mandatory (user_id, name, amount) VALUES (?, ?, ?)",
-                        (user_id, name, amount),
-                    )
+                upsert_mandatory(user_id, name, amount)
             context.user_data["wizard_step"] = "wizard_time"
             await update.message.reply_text(
-                "⏰ *Шаг 5 из 5:* В какое *время по МСК* присылать вечерний отчёт? (например: `21:00`):",
+                f"⏰ *Шаг 5 из 5:* В какое *время ({TZ_LABEL})* присылать вечерний отчёт? (например: `21:00`):",
                 parse_mode="Markdown",
             )
             return
@@ -1525,20 +1893,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not parsed:
             await update.message.reply_text("⚠️ Введи сумму числом, например: `500 Подработка`", parse_mode="Markdown")
             return
-        amount, comment = parsed
-        with db() as conn:
-            conn.execute(
-                "INSERT INTO savings_topups (user_id, topup_date, amount, comment) VALUES (?, ?, ?, ?)",
-                (user_id, today_date().isoformat(), amount, comment),
-            )
-        context.user_data.clear()
-        info = get_budget_info(user_id)
-        await update.message.reply_text(
-            f"💰 В плановую копилку зачислено: *+{fmt_money(amount)}* ({esc(comment)})!\n"
-            f"💰 Всего в копилке: *{fmt_money(info['total_save_effective'])}*",
-            parse_mode="Markdown",
-            reply_markup=MAIN_KB,
-        )
+        await piggy_add(update, context, user_id, *parsed)
         return
 
     if state == "wait_withdraw_piggy":
@@ -1547,23 +1902,27 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Введи сумму и причину, например: `3000 ремонт телефона`", parse_mode="Markdown")
             return
         amount, comment = parsed
-        t_date = today_date()
+        info = get_budget_info(user_id)
+        if amount > info["piggy_total"] + 0.005:
+            await update.message.reply_text(
+                f"⚠️ В копилке только *{fmt_money(max(0.0, info['piggy_total']))}*, а вы хотите снять "
+                f"*{fmt_money(amount)}*. Введите сумму поменьше или нажмите /cancel.",
+                parse_mode="Markdown",
+            )
+            return
         with db() as conn:
-            cur = conn.execute(
-                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
-                (user_id, t_date.isoformat(), amount, f"Из копилки: {comment}"),
-            )
-            conn.execute(
-                "INSERT INTO savings_topups (user_id, topup_date, amount, comment, expense_id) VALUES (?, ?, ?, ?, ?)",
-                (user_id, t_date.isoformat(), -amount, f"Снятие: {comment}", cur.lastrowid),
-            )
+            tid = conn.execute(
+                "INSERT INTO savings_topups (user_id, topup_date, amount, comment) VALUES (?, ?, ?, ?)",
+                (user_id, today_date().isoformat(), -amount, f"Снятие: {comment}"),
+            ).lastrowid
         context.user_data.clear()
         info = get_budget_info(user_id)
         await update.message.reply_text(
             f"💸 Снято из копилки: *-{fmt_money(amount)}* ({esc(comment)})!\n"
-            f"💰 Всего в плановой копилке: *{fmt_money(info['total_save_effective'])}*",
+            f"🏦 Осталось в копилке: *{fmt_money(info['piggy_total'])}*\n"
+            "_На дневной лимит и банк сдачи снятие не влияет._",
             parse_mode="Markdown",
-            reply_markup=MAIN_KB,
+            reply_markup=piggy_undo_kb(tid),
         )
         return
 
@@ -1583,6 +1942,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if state == "wait_days_count":
         if text.lower() == "авто":
+            freeze_past_limits(user_id)
             with db() as conn:
                 conn.execute(
                     "DELETE FROM settings WHERE user_id = ? AND key = 'custom_days_in_month'", (user_id,)
@@ -1622,7 +1982,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_reminder_time(user_id, *t)
         context.user_data.clear()
         await update.message.reply_text(
-            f"⏰ Время вечернего отчёта изменено на *{t[0]:02d}:{t[1]:02d} МСК*!\n\n" + build_settings_text(user_id),
+            f"⏰ Время вечернего отчёта изменено на *{t[0]:02d}:{t[1]:02d} ({TZ_LABEL})*!\n\n" + build_settings_text(user_id),
             parse_mode="Markdown",
             reply_markup=settings_inline_kb(user_id),
         )
@@ -1648,14 +2008,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Напиши название и сумму, например: `Аренда 15000`", parse_mode="Markdown")
             return
         amount, name = parsed
-        with db() as conn:
-            conn.execute(
-                "INSERT INTO mandatory (user_id, name, amount) VALUES (?, ?, ?)",
-                (user_id, name, amount),
-            )
+        updated = upsert_mandatory(user_id, name, amount)
         context.user_data.clear()
         await update.message.reply_text(
-            f"✅ Добавлен обязательный расход: *{esc(name)} — {fmt_money(amount)}*\n\n" + build_settings_text(user_id),
+            f"✅ {'Обновлён' if updated else 'Добавлен'} обязательный расход: *{esc(name)} — {fmt_money(amount)}*\n\n" + build_settings_text(user_id),
             parse_mode="Markdown",
             reply_markup=settings_inline_kb(user_id),
         )
@@ -1664,19 +2020,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("+"):
         parsed = parse_amount_comment(text[1:], "Пополнение")
         if parsed:
-            amount, comment = parsed
-            with db() as conn:
-                conn.execute(
-                    "INSERT INTO savings_topups (user_id, topup_date, amount, comment) VALUES (?, ?, ?, ?)",
-                    (user_id, today_date().isoformat(), amount, comment),
-                )
-            info = get_budget_info(user_id)
-            await update.message.reply_text(
-                f"💰 В плановую копилку зачислено: *+{fmt_money(amount)}* ({esc(comment)})!\n"
-                f"💰 Всего в копилке: *{fmt_money(info['total_save_effective'])}*",
-                parse_mode="Markdown",
-                reply_markup=MAIN_KB,
-            )
+            await piggy_add(update, context, user_id, *parsed)
             return
 
     parsed = parse_expense_message(text)
@@ -1689,6 +2033,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     amount, category, spent_d = parsed
+    if spent_d > today_date():
+        await update.message.reply_text(
+            f"⚠️ Дата {spent_d.strftime('%d.%m.%Y')} ещё не наступила, трату не записал. "
+            "Укажите сегодня, вчера или прошедшую дату.",
+            reply_markup=MAIN_KB,
+        )
+        return
     ensure_start_day(user_id)
     with db() as conn:
         conn.execute(
@@ -1711,7 +2062,7 @@ def main():
     logger.info("Бот запущен. Часовой пояс: %s, база: %s", TZ_NAME, DB_PATH)
 
     persistence = PicklePersistence(filepath=STATE_PATH)
-    app = Application.builder().token(BOT_TOKEN).persistence(persistence).build()
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
 
     if app.job_queue:
         app.job_queue.run_repeating(daily_reminder_job, interval=60, first=10)
@@ -1725,6 +2076,9 @@ def main():
     app.add_handler(CommandHandler("excel", send_excel))
     app.add_handler(CommandHandler("settings", show_settings))
     app.add_handler(CommandHandler("undo", undo_last))
+    app.add_handler(CommandHandler("piggy", show_piggy))
+    app.add_handler(CommandHandler("history", show_history))
+    app.add_handler(CommandHandler("help", help_cmd))
 
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
