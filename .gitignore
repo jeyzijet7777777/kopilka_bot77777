@@ -1,0 +1,14 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+bot_state.pkl
+Бюджет_*.xlsx
+__pycache__/
+*.pyc
+venv/
+.venv/
+backups/
+.pytest_cache/
+.kopilka_marker.json
+data/
