@@ -104,6 +104,12 @@
       </div>
 
       <!-- Action Buttons -->
+      <button id="feedback-btn" onclick="openFeedbackModal('status')" class="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500/20 to-blue-500/20 hover:from-cyan-500/30 hover:to-blue-500/30 border border-cyan-500/40 text-cyan-200 text-xs flex items-center gap-2 transition shadow-md shadow-cyan-500/10 active:scale-95 group">
+        <span class="text-sm group-hover:scale-125 transition">💬</span>
+        <span class="text-[11px] font-semibold">Обратная связь</span>
+        <span id="feedback-unread-badge" class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+      </button>
+
       <button id="lounge-btn" onclick="sendAllToLounge()" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 text-xs flex items-center gap-1.5 transition">
         <span>☕</span>
         <span class="text-[11px]">В лаунж</span>
@@ -496,7 +502,257 @@
 
     </div>
 
+    <!-- FLOATING LIVE EXPLANATION HUD (ЧТОБЫ ЧЕЛОВЕК ВСЕГДА ПОНИМАЛ В РЕАЛЬНОМ ВРЕМЕНИ) -->
+    <div id="human-feedback-hud" class="fixed bottom-24 right-5 max-w-sm w-full bg-[#0d1629]/95 backdrop-blur-xl border border-cyan-500/40 rounded-2xl p-3.5 shadow-[0_20px_60px_rgba(0,0,0,0.85)] z-40 transition-all duration-300">
+      <div class="flex items-center justify-between pb-2 border-b border-white/10">
+        <div class="flex items-center gap-2">
+          <span class="text-base">💡</span>
+          <span class="text-xs font-bold text-white tracking-wide">Понятно о разработке</span>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <span id="hud-step-pill" class="text-[9.5px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-semibold">Ожидание</span>
+          <button onclick="toggleHud(false)" title="Свернуть" class="text-slate-400 hover:text-white text-xs px-1.5 py-0.5 rounded hover:bg-white/10">✕</button>
+        </div>
+      </div>
+
+      <div id="hud-body" class="mt-2.5">
+        <div class="flex items-start gap-2.5">
+          <div id="hud-avatar" class="w-8 h-8 rounded-xl bg-slate-900 border border-cyan-500/30 flex items-center justify-center text-lg shrink-0 shadow-inner">
+            🤖
+          </div>
+          <div class="flex-1">
+            <div class="text-[11.5px] font-bold text-cyan-300" id="hud-title">Офис готов к работе</div>
+            <p class="text-[11px] text-slate-300 mt-1 leading-relaxed" id="hud-desc">
+              Нажмите кнопку «🚀 Запустить» или выберите шаблон внизу. Агенты наглядно пройдут все этапы: от проектирования базы до тестов.
+            </p>
+          </div>
+        </div>
+
+        <!-- Progress Stepper Bar -->
+        <div class="mt-3">
+          <div class="flex justify-between text-[9px] font-mono text-slate-400 mb-1">
+            <span id="hud-progress-label">Готовность: 0%</span>
+            <span id="hud-agent-label" class="text-cyan-400 font-bold">Оркестратор</span>
+          </div>
+          <div class="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
+            <div id="hud-bar" class="bg-gradient-to-r from-cyan-400 via-blue-500 to-indigo-500 h-1.5 rounded-full transition-all duration-500" style="width: 5%"></div>
+          </div>
+        </div>
+
+        <div class="mt-3 pt-2 border-t border-white/5 flex items-center justify-between text-[11px]">
+          <span class="text-slate-400 text-[10px]">Есть вопросы или предложения?</span>
+          <button onclick="openFeedbackModal('write')" class="text-cyan-400 hover:text-cyan-300 font-medium underline flex items-center gap-1">
+            <span>Окно обратной связи</span> →
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Minimized HUD Button -->
+    <button id="hud-collapsed-pill" onclick="toggleHud(true)" class="hidden fixed bottom-24 right-5 px-3.5 py-2 rounded-full bg-[#0d1629]/95 hover:bg-[#152340] border border-cyan-500/40 text-cyan-300 text-xs font-medium shadow-2xl backdrop-blur-md z-40 flex items-center gap-2 transition hover:scale-105 active:scale-95">
+      <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
+      <span class="text-sm">💡</span>
+      <span class="text-[11px] font-semibold">Понятный статус</span>
+      <span class="text-[10px] text-slate-400 font-mono">▲</span>
+    </button>
+
   </main>
+
+  <!-- ======================================================== -->
+  <!-- MODAL: HUMAN FEEDBACK & DEVELOPMENT GUIDE WINDOW -->
+  <!-- ======================================================== -->
+  <div id="feedback-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-50 hidden flex items-center justify-center p-3 md:p-6 overflow-y-auto">
+    <div class="bg-[#101726] border border-cyan-500/30 rounded-3xl max-w-2xl w-full p-5 md:p-6 shadow-[0_25px_80px_rgba(0,0,0,0.9)] relative flex flex-col max-h-[90vh]">
+      
+      <!-- Close Button -->
+      <button onclick="closeFeedbackModal()" class="absolute top-5 right-5 text-slate-400 hover:text-white text-lg p-1 rounded-lg hover:bg-white/5 transition">✕</button>
+
+      <!-- Modal Header -->
+      <div class="flex items-center gap-3.5 pb-4 border-b border-white/10 shrink-0">
+        <div class="w-11 h-11 rounded-2xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-2xl shadow-lg shadow-cyan-500/20 text-white">
+          💬
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h2 class="text-base font-bold text-white tracking-wide">Центр обратной связи и понимания</h2>
+            <span class="px-2 py-0.5 rounded-full text-[9.5px] font-mono bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold">Human Feedback</span>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5">Всё о текущей работе ИИ-агентов простыми словами и прямая связь с разработчиками</p>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <div class="flex items-center gap-2 pt-3 pb-2 shrink-0 border-b border-white/5 text-xs font-medium">
+        <button id="fb-tab-btn-status" onclick="switchFeedbackTab('status')" class="px-3.5 py-1.5 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 transition flex items-center gap-1.5">
+          <span>🎯</span> Что сейчас происходит
+        </button>
+        <button id="fb-tab-btn-write" onclick="switchFeedbackTab('write')" class="px-3.5 py-1.5 rounded-xl bg-white/5 text-slate-400 hover:text-white border border-transparent hover:border-white/10 transition flex items-center gap-1.5">
+          <span>✍️</span> Оставить отзыв / указание
+        </button>
+        <button id="fb-tab-btn-guide" onclick="switchFeedbackTab('guide')" class="px-3.5 py-1.5 rounded-xl bg-white/5 text-slate-400 hover:text-white border border-transparent hover:border-white/10 transition flex items-center gap-1.5">
+          <span>📖</span> Памятка для человека
+        </button>
+      </div>
+
+      <!-- TAB CONTENT: 1. STATUS (ЧТО СЕЙЧАС ПРОИСХОДИТ) -->
+      <div id="fb-tab-status" class="flex-1 overflow-y-auto pt-4 space-y-4 pr-1">
+        
+        <!-- Live Status Card -->
+        <div class="p-4 rounded-2xl bg-gradient-to-br from-cyan-950/40 via-slate-900/60 to-blue-950/40 border border-cyan-500/30">
+          <div class="flex items-center justify-between">
+            <span class="text-[11px] font-mono text-cyan-400 uppercase tracking-wider flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span> Текущий этап в деталях
+            </span>
+            <span id="fb-stage-badge" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-cyan-500/20 text-cyan-300">Этап 1: Ожидание</span>
+          </div>
+          <h3 id="fb-stage-title" class="text-sm font-bold text-white mt-1.5">Офис готов к приёму задач</h3>
+          <p id="fb-stage-human" class="text-xs text-slate-200 mt-2 leading-relaxed">
+            В этом виртуальном офисе работают три ИИ-специалиста: Архитектор Alex (база данных), Разработчик Maya (Telegram-бот) и Тестировщик Leo (автотесты). Сейчас они ожидают запуска спринта.
+          </p>
+        </div>
+
+        <!-- 5-Step Visual Stepper -->
+        <div class="space-y-2.5">
+          <div class="text-[11px] font-mono text-slate-400 uppercase">Пошаговый маршрут разработки:</div>
+          
+          <div class="grid grid-cols-1 md:grid-cols-5 gap-2 text-center text-xs">
+            <!-- Step 1 -->
+            <div id="stepper-step-1" class="p-2.5 rounded-xl bg-cyan-500/20 border border-cyan-400/40 flex flex-col items-center justify-between transition">
+              <div class="w-6 h-6 rounded-full bg-cyan-500 text-slate-950 font-bold text-[11px] flex items-center justify-center mb-1">1</div>
+              <div class="font-semibold text-white text-[11px]">Получение ТЗ</div>
+              <div class="text-[9px] text-cyan-300 mt-0.5">Разбор задачи</div>
+            </div>
+
+            <!-- Step 2 -->
+            <div id="stepper-step-2" class="p-2.5 rounded-xl bg-white/5 border border-white/10 flex flex-col items-center justify-between transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 font-bold text-[11px] flex items-center justify-center mb-1">2</div>
+              <div class="font-semibold text-slate-300 text-[11px]">База SQLite</div>
+              <div class="text-[9px] text-slate-400 mt-0.5">Alex (Архитектор)</div>
+            </div>
+
+            <!-- Step 3 -->
+            <div id="stepper-step-3" class="p-2.5 rounded-xl bg-white/5 border border-white/10 flex flex-col items-center justify-between transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 font-bold text-[11px] flex items-center justify-center mb-1">3</div>
+              <div class="font-semibold text-slate-300 text-[11px]">Код Telegram</div>
+              <div class="text-[9px] text-slate-400 mt-0.5">Maya (Разработчик)</div>
+            </div>
+
+            <!-- Step 4 -->
+            <div id="stepper-step-4" class="p-2.5 rounded-xl bg-white/5 border border-white/10 flex flex-col items-center justify-between transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 font-bold text-[11px] flex items-center justify-center mb-1">4</div>
+              <div class="font-semibold text-slate-300 text-[11px]">Тесты pytest</div>
+              <div class="text-[9px] text-slate-400 mt-0.5">Leo (QA Engineer)</div>
+            </div>
+
+            <!-- Step 5 -->
+            <div id="stepper-step-5" class="p-2.5 rounded-xl bg-white/5 border border-white/10 flex flex-col items-center justify-between transition">
+              <div class="w-6 h-6 rounded-full bg-slate-800 text-slate-400 font-bold text-[11px] flex items-center justify-center mb-1">5</div>
+              <div class="font-semibold text-slate-300 text-[11px]">Готово в релиз</div>
+              <div class="text-[9px] text-slate-400 mt-0.5">Запуск бота</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Why It Matters Block -->
+        <div class="p-3.5 rounded-xl bg-white/5 border border-white/10 space-y-2 text-xs">
+          <div class="font-semibold text-amber-300 flex items-center gap-1.5">
+            <span>🛡️</span> Почему это сделано именно так?
+          </div>
+          <p class="text-slate-300 text-[11.5px] leading-relaxed">
+            Мы не просто пишем код, а применяем строгие инженерные гарантии: ни одна строчка не попадает в бота без миграции базы данных и проверки 143 автоматическими тестами. Ваши финансовые записи, лимиты и копилки гарантированно сохраняются.
+          </p>
+        </div>
+
+      </div>
+
+      <!-- TAB CONTENT: 2. WRITE FEEDBACK (ФОРМА ОБРАТНОЙ СВЯЗИ) -->
+      <div id="fb-tab-write" class="flex-1 overflow-y-auto pt-4 space-y-4 pr-1 hidden">
+        
+        <div class="p-4 rounded-2xl bg-white/5 border border-white/10">
+          <div class="text-xs font-semibold text-white">Оцените работу ИИ-студии:</div>
+          <div class="flex items-center gap-3 mt-2" id="feedback-rating-row">
+            <button onclick="setFeedbackRating(5)" id="rate-5-btn" class="rating-btn px-3 py-1.5 rounded-xl bg-cyan-500/20 border border-cyan-400/40 text-cyan-300 text-xs font-bold transition">⭐⭐⭐⭐⭐ Отлично</button>
+            <button onclick="setFeedbackRating(4)" id="rate-4-btn" class="rating-btn px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-slate-300 text-xs transition">⭐⭐⭐⭐ Хорошо</button>
+            <button onclick="setFeedbackRating(3)" id="rate-3-btn" class="rating-btn px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-slate-300 text-xs transition">⭐⭐⭐ Нормально</button>
+          </div>
+
+          <div class="mt-4">
+            <label class="block text-xs font-medium text-slate-300 mb-1.5">
+              Ваше пожелание, замечание или вопрос агентам:
+            </label>
+            <textarea id="feedback-text-input" rows="3" 
+                      placeholder="Например: 'Добавьте экспорт отчёта в PDF' или 'Сделайте сообщение вечернего отчёта чуть короче'..." 
+                      class="w-full bg-[#080d1a] border border-white/10 rounded-xl p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 transition resize-none"></textarea>
+          </div>
+
+          <div class="mt-3 flex items-center justify-between">
+            <span class="text-[10px] text-slate-400 font-mono">Агенты мгновенно ответят в окне логов</span>
+            <button onclick="submitUserFeedback()" class="px-5 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-semibold text-xs flex items-center gap-2 shadow-lg shadow-cyan-500/20 active:scale-95 transition">
+              <span>📨 Отправить отзыв</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- History of User Feedbacks -->
+        <div>
+          <div class="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2 flex items-center justify-between">
+            <span>Ваши отзывы и ответы агентов:</span>
+            <button onclick="clearFeedbackHistory()" class="text-[10px] text-slate-500 hover:text-slate-300 underline">Очистить историю</button>
+          </div>
+          <div id="feedback-history-list" class="space-y-2 max-h-48 overflow-y-auto">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+
+      </div>
+
+      <!-- TAB CONTENT: 3. BEGINNER GUIDE (ПАМЯТКА) -->
+      <div id="fb-tab-guide" class="flex-1 overflow-y-auto pt-4 space-y-3.5 pr-1 hidden text-xs">
+        
+        <div class="p-3.5 rounded-xl bg-white/5 border border-white/10">
+          <div class="font-bold text-white flex items-center gap-2 text-[12.5px]">
+            <span>1️⃣</span> Как поставить задачу офису?
+          </div>
+          <p class="text-slate-300 mt-1 leading-relaxed">
+            Вы можете просто написать текст задачи в поле внизу (например: «Добавить мультивалютность») или перетащить файл ТЗ прямо на пол комнаты. Также можно кликнуть готовый шаблон (например «💳 Интеграция СБП»).
+          </p>
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-white/5 border border-white/10">
+          <div class="font-bold text-white flex items-center gap-2 text-[12.5px]">
+            <span>2️⃣</span> Кто за что отвечает в команде?
+          </div>
+          <ul class="text-slate-300 mt-1.5 space-y-1 list-disc list-inside leading-relaxed">
+            <li><b class="text-cyan-300">Alex (Архитектор):</b> проектирует схему базы данных в <code class="bg-black/30 px-1 py-0.5 rounded text-cyan-200">migrations.py</code> и следит за сохранностью файлов.</li>
+            <li><b class="text-purple-300">Maya (Разработчик):</b> пишет асинхронный код на <code class="bg-black/30 px-1 py-0.5 rounded text-purple-200">python-telegram-bot v21</code>, клавиатуры и графики.</li>
+            <li><b class="text-emerald-300">Leo (Тестировщик):</b> запускает тесты <code class="bg-black/30 px-1 py-0.5 rounded text-emerald-200">pytest</code> и проверяет работу бэкапов <code class="bg-black/30 px-1 py-0.5 rounded text-emerald-200">datasafe.py</code>.</li>
+          </ul>
+        </div>
+
+        <div class="p-3.5 rounded-xl bg-white/5 border border-white/10">
+          <div class="font-bold text-white flex items-center gap-2 text-[12.5px]">
+            <span>3️⃣</span> Как запустить бота в Telegram?
+          </div>
+          <div class="mt-1 p-2.5 rounded-lg bg-[#080d1a] font-mono text-[11px] text-amber-300 border border-white/5">
+            ALLOW_EPHEMERAL_DB=1 DATA_DIR=. DB_PATH=budget.db python bot.py
+          </div>
+          <p class="text-slate-400 text-[11px] mt-1">
+            Перед запуском убедитесь, что в файле <code class="text-slate-200">.env</code> указан ваш реальный <code class="text-cyan-300">BOT_TOKEN</code> от @BotFather.
+          </p>
+        </div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="pt-4 border-t border-white/10 flex justify-between items-center shrink-0 mt-3">
+        <span class="text-[11px] text-slate-400">Студия Kopilka Bot • Всё под контролем</span>
+        <button onclick="closeFeedbackModal()" class="px-5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition">
+          Закрыть
+        </button>
+      </div>
+
+    </div>
+  </div>
 
   <!-- ======================================================== -->
   <!-- MODAL: AGENT DETAIL INSPECTION MODAL -->
@@ -866,6 +1122,17 @@
 
       addLog('orchestrator', `🧠 ИИ-Оркестратор начал анализ задачи: "${taskText}"`, 'text-cyan-400 font-bold');
 
+      // Update Human Feedback HUD & Stepper (Step 1)
+      updateFeedbackProgress(
+        1, 
+        'Шаг 1 из 5', 
+        'Разбор задачи и планирование', 
+        `ИИ-Оркестратор анализирует задачу «${taskText}» и делит её на понятные технические подзадачи для каждого специалиста команды.`, 
+        'Оркестратор', 
+        20, 
+        '🧠'
+      );
+
       // 1. Dynamic Task Decomposition based on prompt content
       kanbanTasks = [
         { id: 101, title: `Архитектура БД: ${taskText.slice(0, 18)}...`, owner: "Alex", status: "todo", color: "bg-cyan-500/15 text-cyan-300 border-cyan-500/20" },
@@ -879,6 +1146,16 @@
 
       // 2. Alex stands up and walks to desk
       setTimeout(() => {
+        updateFeedbackProgress(
+          2, 
+          'Шаг 2 из 5', 
+          'Проектирование базы SQLite', 
+          'Alex сел за свой рабочий стол и пишет схему базы данных (migrations.py). Это нужно, чтобы бот никогда не терял ваши записи и баланс копилок.', 
+          'Alex (Архитектор)', 
+          40, 
+          '🧑‍🔬'
+        );
+
         moveAgentTo(0, 'desk', () => {
           // Alex sits down and starts coding migrations
           document.getElementById('agent-0-status').textContent = '⚡ Кодит migrations.py';
@@ -896,6 +1173,16 @@
 
       // 3. Maya stands up and walks to desk
       setTimeout(() => {
+        updateFeedbackProgress(
+          3, 
+          'Шаг 3 из 5', 
+          'Написание кода Telegram-бота', 
+          'Maya села за ультраширокий монитор и реализует асинхронную логику Telegram, кнопки меню и форматирование сообщений.', 
+          'Maya (Разработчик)', 
+          60, 
+          '👩‍💻'
+        );
+
         moveAgentTo(1, 'desk', () => {
           // Maya sits down and starts coding handlers
           document.getElementById('agent-1-status').textContent = '⚡ Кодит bot.py & хендлеры';
@@ -912,6 +1199,16 @@
 
       // 4. Leo stands up and walks to desk
       setTimeout(() => {
+        updateFeedbackProgress(
+          4, 
+          'Шаг 4 из 5', 
+          'Тестирование качества (pytest)', 
+          'Leo запускает 143 автоматических теста. Если в коде есть хоть малейший баг при расчёте бюджета, тест не пропустит его в работу.', 
+          'Leo (Тестировщик)', 
+          80, 
+          '🧑‍🔧'
+        );
+
         moveAgentTo(2, 'desk', () => {
           document.getElementById('agent-2-status').textContent = '⚡ Пишет pytest тесты';
           agents[2].thought = `Готовлю изолированные фикстуры и тесты для: ${taskText}`;
@@ -959,6 +1256,16 @@
         addLog('system', `🎉 Задача "${taskText}" полностью реализована и протестирована!`, 'text-cyan-300 font-bold');
         document.getElementById('office-status-pill').innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> РАБОТА ВЫПОЛНЕНА (100%)';
         document.getElementById('orchestrator-status-text').innerHTML = '<span>✅ Все задачи спринта успешно закрыты!</span>';
+
+        updateFeedbackProgress(
+          5, 
+          'Шаг 5 из 5: Готово!', 
+          'Все задачи спринта выполнены', 
+          'Все модули протестированы и собраны. База данных обновлена и находится в полной безопасности. Бот готов к работе в Telegram!', 
+          'Вся команда', 
+          100, 
+          '🎉'
+        );
       }, 10500);
     }
 
@@ -994,8 +1301,228 @@
       addLog('office', '🪴 Фикус Монстера полит! В студии стало на 12% уютнее.', 'text-emerald-300');
     }
 
+    // --- Human Feedback & Guidance System ---
+    let currentFeedbackRating = 5;
+    let hudCollapsed = false;
+
+    function toggleHud(forceShow = null) {
+      const hud = document.getElementById('human-feedback-hud');
+      const pill = document.getElementById('hud-collapsed-pill');
+      if (forceShow === true) {
+        hudCollapsed = false;
+      } else if (forceShow === false) {
+        hudCollapsed = true;
+      } else {
+        hudCollapsed = !hudCollapsed;
+      }
+
+      if (hudCollapsed) {
+        hud.classList.add('hidden');
+        pill.classList.remove('hidden');
+      } else {
+        hud.classList.remove('hidden');
+        pill.classList.add('hidden');
+      }
+    }
+
+    function openFeedbackModal(tab = 'status') {
+      document.getElementById('feedback-modal').classList.remove('hidden');
+      switchFeedbackTab(tab);
+      playBeep(520, 0.05);
+    }
+
+    function closeFeedbackModal() {
+      document.getElementById('feedback-modal').classList.add('hidden');
+    }
+
+    function switchFeedbackTab(tab) {
+      const tabs = ['status', 'write', 'guide'];
+      tabs.forEach(t => {
+        const btn = document.getElementById(`fb-tab-btn-${t}`);
+        const content = document.getElementById(`fb-tab-${t}`);
+        if (!btn || !content) return;
+        if (t === tab) {
+          btn.className = "px-3.5 py-1.5 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 transition flex items-center gap-1.5 font-semibold";
+          content.classList.remove('hidden');
+        } else {
+          btn.className = "px-3.5 py-1.5 rounded-xl bg-white/5 text-slate-400 hover:text-white border border-transparent hover:border-white/10 transition flex items-center gap-1.5";
+          content.classList.add('hidden');
+        }
+      });
+      if (tab === 'write') {
+        renderFeedbackHistory();
+      }
+    }
+
+    function updateFeedbackProgress(stepNum, stageBadge, title, humanDesc, agentName, percent, avatar = '🤖') {
+      // 1. Update Floating HUD
+      const hudPill = document.getElementById('hud-step-pill');
+      const hudTitle = document.getElementById('hud-title');
+      const hudDesc = document.getElementById('hud-desc');
+      const hudAvatar = document.getElementById('hud-avatar');
+      const hudAgent = document.getElementById('hud-agent-label');
+      const hudProg = document.getElementById('hud-progress-label');
+      const hudBar = document.getElementById('hud-bar');
+
+      if (hudPill) hudPill.textContent = stageBadge;
+      if (hudTitle) hudTitle.textContent = title;
+      if (hudDesc) hudDesc.textContent = humanDesc;
+      if (hudAvatar) hudAvatar.textContent = avatar;
+      if (hudAgent) hudAgent.textContent = agentName;
+      if (hudProg) hudProg.textContent = `Готовность: ${percent}%`;
+      if (hudBar) hudBar.style.width = `${percent}%`;
+
+      // 2. Update Modal Status Details
+      const fbStageBadge = document.getElementById('fb-stage-badge');
+      const fbStageTitle = document.getElementById('fb-stage-title');
+      const fbStageHuman = document.getElementById('fb-stage-human');
+      if (fbStageBadge) fbStageBadge.textContent = stageBadge;
+      if (fbStageTitle) fbStageTitle.textContent = title;
+      if (fbStageHuman) fbStageHuman.textContent = humanDesc;
+
+      // 3. Update Stepper in Modal
+      for (let i = 1; i <= 5; i++) {
+        const stepCard = document.getElementById(`stepper-step-${i}`);
+        if (!stepCard) continue;
+        const numCircle = stepCard.querySelector('div');
+        if (!numCircle) continue;
+        if (i < stepNum) {
+          stepCard.className = "p-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex flex-col items-center justify-between transition";
+          numCircle.className = "w-6 h-6 rounded-full bg-emerald-500 text-slate-950 font-bold text-[11px] flex items-center justify-center mb-1";
+          numCircle.textContent = "✓";
+        } else if (i === stepNum) {
+          stepCard.className = "p-2.5 rounded-xl bg-cyan-500/20 border border-cyan-400/50 flex flex-col items-center justify-between transition shadow-lg shadow-cyan-500/20";
+          numCircle.className = "w-6 h-6 rounded-full bg-cyan-400 text-slate-950 font-bold text-[11px] flex items-center justify-center mb-1 animate-pulse";
+          numCircle.textContent = i;
+        } else {
+          stepCard.className = "p-2.5 rounded-xl bg-white/5 border border-white/10 flex flex-col items-center justify-between transition opacity-60";
+          numCircle.className = "w-6 h-6 rounded-full bg-slate-800 text-slate-400 font-bold text-[11px] flex items-center justify-center mb-1";
+          numCircle.textContent = i;
+        }
+      }
+    }
+
+    function setFeedbackRating(stars) {
+      currentFeedbackRating = stars;
+      [3, 4, 5].forEach(r => {
+        const btn = document.getElementById(`rate-${r}-btn`);
+        if (!btn) return;
+        if (r === stars) {
+          btn.className = "rating-btn px-3 py-1.5 rounded-xl bg-cyan-500/25 border border-cyan-400 text-cyan-200 text-xs font-bold transition shadow-sm";
+        } else {
+          btn.className = "rating-btn px-3 py-1.5 rounded-xl bg-white/5 border border-white/10 text-slate-400 text-xs transition";
+        }
+      });
+      playBeep(640, 0.05);
+    }
+
+    function getFeedbackList() {
+      try {
+        const saved = localStorage.getItem('kopilka_user_feedbacks');
+        if (saved) return JSON.parse(saved);
+      } catch (e) {}
+      return [
+        {
+          id: 1,
+          time: "10:30",
+          rating: 5,
+          text: "Очень наглядно сделано! Видно, как каждый агент пишет свою часть и все тесты проходят зелёным.",
+          reply: "Alex (Архитектор): Спасибо большое! Рады делать разработку прозрачной и понятной!"
+        }
+      ];
+    }
+
+    function saveFeedbackList(list) {
+      try {
+        localStorage.setItem('kopilka_user_feedbacks', JSON.stringify(list));
+      } catch (e) {}
+    }
+
+    function submitUserFeedback() {
+      const input = document.getElementById('feedback-text-input');
+      const text = input.value.trim();
+      if (!text) {
+        input.focus();
+        playBeep(320, 0.1, 'sawtooth');
+        return;
+      }
+
+      const list = getFeedbackList();
+      const time = new Date().toTimeString().split(' ')[0].slice(0, 5);
+      
+      const replies = [
+        "Maya (Разработчик): Принято в работу! Обязательно учту это в следующем улучшении кода.",
+        "Alex (Архитектор): Отличная мысль! Добавлю это в требования к архитектуре и сохранности данных.",
+        "Leo (Тестировщик): Зафиксировал замечание! Напишу под этот кейс отдельный тест в pytest.",
+        "Оркестратор: Спасибо за обратную связь! Команда адаптирует план разработки."
+      ];
+      const randomReply = replies[Math.floor(Math.random() * replies.length)];
+
+      const newEntry = {
+        id: Date.now(),
+        time: time,
+        rating: currentFeedbackRating,
+        text: text,
+        reply: randomReply
+      };
+
+      list.unshift(newEntry);
+      saveFeedbackList(list);
+
+      input.value = '';
+      renderFeedbackHistory();
+
+      // Sound & Log
+      playVictoryChime();
+      addLog('Пользователь', `[Обратная связь ★${currentFeedbackRating}] "${text}"`, 'text-cyan-300 font-bold');
+      addLog('Команда', randomReply, 'text-purple-300 font-semibold');
+
+      // Visual button feedback
+      const btn = document.getElementById('feedback-btn');
+      if (btn) {
+        btn.classList.add('ring-2', 'ring-cyan-400');
+        setTimeout(() => btn.classList.remove('ring-2', 'ring-cyan-400'), 2000);
+      }
+    }
+
+    function renderFeedbackHistory() {
+      const container = document.getElementById('feedback-history-list');
+      if (!container) return;
+      const list = getFeedbackList();
+      if (list.length === 0) {
+        container.innerHTML = '<div class="text-[11px] text-slate-500 italic p-3 text-center bg-white/5 rounded-xl">Пока нет отзывов. Напишите первый отзыв выше!</div>';
+        return;
+      }
+
+      container.innerHTML = '';
+      list.forEach(item => {
+        const div = document.createElement('div');
+        div.className = "p-3 rounded-xl bg-[#080d1a] border border-white/5 text-xs space-y-1.5";
+        const starsText = "⭐".repeat(item.rating);
+        div.innerHTML = `
+          <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+            <span class="text-amber-300 font-bold">${starsText}</span>
+            <span>${item.time}</span>
+          </div>
+          <p class="text-slate-200 text-[11.5px]">${item.text}</p>
+          <div class="pt-1 border-t border-white/5 text-[11px] text-cyan-300/90 flex items-start gap-1.5">
+            <span>💬</span>
+            <span class="italic">${item.reply}</span>
+          </div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    function clearFeedbackHistory() {
+      localStorage.removeItem('kopilka_user_feedbacks');
+      renderFeedbackHistory();
+      playBeep(440, 0.05);
+    }
+
     // Initial setup
     renderKanban();
+    renderFeedbackHistory();
   </script>
 </body>
 </html>
