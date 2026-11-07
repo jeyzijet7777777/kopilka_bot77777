@@ -716,10 +716,11 @@ def find_category_by_token(user_id: int, token: str):
 
 def category_chips(user_id: int, exp_id: int, names, per_row: int = 2) -> list:
     """Кнопки «сменить категорию у траты exp_id на …»."""
-    btns = [
-        InlineKeyboardButton(f"🏷 {n}"[:30], callback_data=f"xc_{exp_id}_{cat_token(n)}")
-        for n in names
-    ]
+    btns = []
+    for n in names:
+        emoji = CATEGORIES_CATALOG.get(n, {}).get("emoji", "🏷")
+        label = f"{emoji} {n}"[:30]
+        btns.append(InlineKeyboardButton(label, callback_data=f"xc_{exp_id}_{cat_token(n)}"))
     return [btns[i:i + per_row] for i in range(0, len(btns), per_row)]
 
 
@@ -727,7 +728,10 @@ def suggestion_rows(user_id: int, exp_id: int, category: str, was_default: bool,
     """Подсказки под только что записанной тратой: без категории — частые из использованных;
     новая категория, похожая на существующую (similar, найдена ДО записи), — «возможно, это …»."""
     if was_default:
-        return category_chips(user_id, exp_id, used_categories(user_id, limit=6, exclude=[category]))
+        cats = used_categories(user_id, limit=6, exclude=[category])
+        if not cats:
+            cats = ["Продукты", "Кафе и рестораны", "Транспорт", "Покупки", "Здоровье", "Дом"]
+        return category_chips(user_id, exp_id, cats)
     if similar:
         return category_chips(user_id, exp_id, [similar], per_row=1)
     if candidates:
@@ -1018,13 +1022,15 @@ def settings_inline_kb(user_id: int):
     warn_on = get_setting(user_id, "warn_limit", "1") != "0"
     week_on = get_setting(user_id, "week_summary", "1") != "0"
     auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
+    ask_cat_on = get_setting(user_id, "ask_cat_on_num", "0") != "0"
     mode_label = INCOME_MODE_SHORT.get(info["income_mode"], info["income_mode"])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🏦 Доход: {fmt_money(info['raw_income'])} ({mode_label})", callback_data="set_daily_income")],
         [InlineKeyboardButton("🔄 Изменить график получения дохода", callback_data="set_income_mode")],
         [InlineKeyboardButton(f"📅 Дней в месяце: {days_label}", callback_data="set_days_count")],
         [InlineKeyboardButton(f"⏰ Время отчёта, {TZ_LABEL} (сейчас {reminder_time})", callback_data="set_reminder_time")],
-        [InlineKeyboardButton(f"🪄 Умные категории трат: {'вкл' if auto_cat_on else 'выкл'}", callback_data="toggle_auto_category")],
+        [InlineKeyboardButton(f"🪄 Авто-категории трат: {'вкл' if auto_cat_on else 'выкл'}", callback_data="toggle_auto_category")],
+        [InlineKeyboardButton(f"❓ Спрашивать категорию для чисел: {'вкл' if ask_cat_on else 'выкл'}", callback_data="toggle_ask_category")],
         [InlineKeyboardButton("🪄 Исправить старые категории трат", callback_data="run_fix_categories")],
         [InlineKeyboardButton(f"📈 График в вечернем отчёте: {'вкл' if chart_on else 'выкл'}", callback_data="toggle_report_chart")],
         [InlineKeyboardButton(f"📅 Отчёт за месяц 1-го числа: {'вкл' if month_report_on else 'выкл'}", callback_data="toggle_month_report")],
@@ -3276,6 +3282,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await expense_edit_callback(update, context, data)
         return
 
+    if data.startswith("askcat_"):
+        token = data.removeprefix("askcat_")
+        if token == "cancel":
+            context.user_data.clear()
+            await query.message.edit_text("❌ Запись траты отменена.")
+            return
+        amt = context.user_data.get("pending_amount")
+        d_str = context.user_data.get("pending_date")
+        if not amt or not d_str:
+            await query.message.edit_text("ℹ️ Данные ввода устарели. Введите сумму заново.")
+            return
+        cat_name = find_category_by_token(user_id, token) or "Разное"
+        spent_d = datetime.date.fromisoformat(d_str)
+        context.user_data.clear()
+
+        ensure_start_day(user_id)
+        before = day_spent(user_id, spent_d)
+        with db() as conn:
+            exp_id = conn.execute(
+                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                (user_id, spent_d.isoformat(), amt, cat_name),
+            ).lastrowid
+        warning = limit_warning(user_id, spent_d, before, before + amt)
+        report_text, markup = build_day_report(user_id, spent_d)
+        await query.message.edit_text(
+            f"✅ Записано: *{fmt_money(amt)}* — {esc(cat_name)} ({spent_d.strftime('%d.%m')})\n\n"
+            f"{warning}{report_text}",
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
+        return
+
     if data == "restart_bot_action":
         context.user_data.clear()
         await refresh_settings(query, user_id, "🧹 *Текущий ввод сброшен.*\n\n")
@@ -3369,7 +3407,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "toggle_auto_category":
         cur = get_setting(user_id, "auto_category", "1")
-        set_setting(user_id, "auto_category", "0" if cur != "0" else "1")
+        new_val = "0" if cur != "0" else "1"
+        set_setting(user_id, "auto_category", new_val)
+        status = "включено (бот автоматически определяет категории трат)" if new_val == "1" else "выключено (траты записываются точно как введено)"
+        await query.message.reply_text(f"🪄 Авто-категории: *{status}*.", parse_mode="Markdown")
+        await refresh_settings(query, user_id)
+
+    elif data == "toggle_ask_category":
+        cur = get_setting(user_id, "ask_cat_on_num", "0")
+        new_val = "1" if cur == "0" else "0"
+        set_setting(user_id, "ask_cat_on_num", new_val)
+        status = "включено (при вводе только числа бот предложит выбрать категорию)" if new_val == "1" else "выключено (число сразу записывается в «Разное» с быстрыми кнопками)"
+        await query.message.reply_text(f"❓ Запрос категории для чисел: *{status}*.", parse_mode="Markdown")
         await refresh_settings(query, user_id)
 
     elif data == "run_fix_categories":
@@ -3851,6 +3900,36 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_expense_edit_input(update, context, user_id, state, text)
         return
 
+    if state == "wait_pick_category_for_amount":
+        amt = context.user_data.get("pending_amount")
+        d_str = context.user_data.get("pending_date")
+        if amt and d_str:
+            spent_d = datetime.date.fromisoformat(d_str)
+            context.user_data.clear()
+            ensure_start_day(user_id)
+            cat_name = text.strip()
+            auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
+            if auto_cat_on:
+                classified_cat, _ = classify_expense(user_id, cat_name, used_categories(user_id))
+                if classified_cat and classified_cat != "Разное":
+                    cat_name = classified_cat
+            cat_name = canonical_category(user_id, cat_name)
+            before = day_spent(user_id, spent_d)
+            with db() as conn:
+                exp_id = conn.execute(
+                    "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                    (user_id, spent_d.isoformat(), amt, cat_name),
+                ).lastrowid
+            warning = limit_warning(user_id, spent_d, before, before + amt)
+            report_text, markup = build_day_report(user_id, spent_d)
+            await update.message.reply_text(
+                f"✅ Записано: *{fmt_money(amt)}* — {esc(cat_name)} ({spent_d.strftime('%d.%m')})\n\n"
+                f"{warning}{report_text}",
+                parse_mode="Markdown",
+                reply_markup=markup or MAIN_KB,
+            )
+            return
+
     if state == "wait_piggy":
         parsed = parse_amount_comment(text, "Пополнение")
         if not parsed:
@@ -4065,20 +4144,44 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     was_default = category == DEFAULT_CATEGORY
     similar = None if was_default else similar_category(user_id, category)  # до записи, иначе найдёт саму себя
 
+    ask_cat_on = get_setting(user_id, "ask_cat_on_num", "0") == "1"
+    if was_default and ask_cat_on:
+        context.user_data.update(
+            state="wait_pick_category_for_amount",
+            pending_amount=amount,
+            pending_date=spent_d.isoformat(),
+        )
+        top = used_categories(user_id, limit=6)
+        if not top:
+            top = ["Продукты", "Кафе и рестораны", "Транспорт", "Покупки", "Здоровье", "Дом"]
+        kb_rows = []
+        for n in top:
+            emoji = CATEGORIES_CATALOG.get(n, {}).get("emoji", "🏷")
+            kb_rows.append([InlineKeyboardButton(f"{emoji} {n}", callback_data=f"askcat_{cat_token(n)}")])
+        kb_rows.append([
+            InlineKeyboardButton("⚪ Разное", callback_data=f"askcat_{cat_token('Разное')}"),
+            InlineKeyboardButton("❌ Отмена", callback_data="askcat_cancel"),
+        ])
+        await update.message.reply_text(
+            f"💰 Сумма: *{fmt_money(amount)}* ({spent_d.strftime('%d.%m')})\n"
+            "🏷 *Выберите категорию* (или напишите текстом следующим сообщением):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb_rows),
+        )
+        return
+
     auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
     note_hint = ""
     candidate_chips = None
 
     if auto_cat_on and not was_default and not similar:
-        known_keys = {cat_key(c) for c in used_categories(user_id)}
-        if cat_key(category) not in known_keys:
-            classified_cat, matched_kw = classify_expense(user_id, category, used_categories(user_id))
-            if classified_cat and classified_cat != "Разное":
-                raw_input = category
-                category = classified_cat
-                note_hint = f"\n💡 _Категория подобрана по слову «{esc(raw_input)}»_"
-                candidate_chips = [raw_input]
-                context.user_data["last_auto_keyword"] = raw_input
+        classified_cat, matched_kw = classify_expense(user_id, category, used_categories(user_id))
+        if classified_cat and classified_cat != "Разное" and cat_key(classified_cat) != cat_key(category):
+            raw_input = category
+            category = classified_cat
+            note_hint = f"\n💡 _Категория подобрана по слову «{esc(raw_input)}»_"
+            candidate_chips = [raw_input]
+            context.user_data["last_auto_keyword"] = raw_input
 
     category = canonical_category(user_id, category)  # «ПРОДУКТЫ» -> уже существующее «Продукты»
     before = day_spent(user_id, spent_d)

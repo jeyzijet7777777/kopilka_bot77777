@@ -370,3 +370,61 @@ def test_fix_categories_cmd_and_button(clean_db):
     run(bot.fix_categories_cmd(upd2, ctx))
     assert "Все категории уже в полном порядке" in msg2.replies[0][0]
 
+
+def test_classify_expense_morphology_and_prepositions():
+    # Проверяем морфологический стемминг и предлоги
+    assert classify_expense(1, "шаурму")[0] == "Кафе и рестораны"
+    assert classify_expense(1, "пиццу")[0] == "Кафе и рестораны"
+    assert classify_expense(1, "аптеку")[0] == "Здоровье"
+    assert classify_expense(1, "в аптеке")[0] == "Здоровье"
+    assert classify_expense(1, "на такси")[0] == "Транспорт"
+    assert classify_expense(1, "купил курицу")[0] == "Продукты"
+    assert classify_expense(1, "картошку")[0] == "Продукты"
+    assert classify_expense(1, "в пятерочке")[0] == "Продукты"
+    assert classify_expense(1, "за бензин")[0] == "Авто"
+    assert classify_expense(1, "одежду")[0] == "Покупки"
+    assert classify_expense(1, "книгу")[0] == "Развлечения"
+
+
+def test_bot_auto_categorizes_even_with_prior_history(clean_db):
+    # Пользователь уже имеет в истории категорию "шаурму"
+    with db() as conn:
+        conn.execute("INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (1, '2026-11-01', 250, 'шаурму')")
+
+    upd, msg = make_update(text="300 шаурму")
+    ctx = make_ctx()
+    run(bot.text_handler(upd, ctx))
+
+    with db() as conn:
+        last = conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1 ORDER BY id DESC LIMIT 1").fetchone()
+
+    # Должно автоматически назначить Кафе и рестораны, несмотря на наличие старой записи
+    assert last["amount"] == 300
+    assert last["category"] == "Кафе и рестораны"
+    assert "Кафе и рестораны" in msg.replies[0][0]
+
+
+def test_ask_category_for_number_flow(clean_db):
+    # Включаем запрос категории для чисел
+    bot.set_setting(1, "ask_cat_on_num", "1")
+
+    upd, msg = make_update(text="500")
+    ctx = make_ctx()
+    run(bot.text_handler(upd, ctx))
+
+    # Бот спросил категорию
+    assert "Выберите категорию" in msg.replies[0][0]
+    assert ctx.user_data.get("state") == "wait_pick_category_for_amount"
+
+    # Пользователь нажал кнопку (например Продукты)
+    markup = msg.replies[0][1]["reply_markup"]
+    btn_cb = [b.callback_data for row in markup.inline_keyboard for b in row if "Продукты" in b.text][0]
+    upd2, msg2 = make_update(data=btn_cb)
+    run(bot.callback_handler(upd2, ctx))
+
+    with db() as conn:
+        row = conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchone()
+    assert row["amount"] == 500
+    assert row["category"] == "Продукты"
+
+
