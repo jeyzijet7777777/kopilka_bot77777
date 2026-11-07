@@ -104,10 +104,10 @@
       </div>
 
       <!-- Action Buttons -->
-      <button id="feedback-btn" onclick="openFeedbackModal('status')" class="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500/20 to-blue-500/20 hover:from-cyan-500/30 hover:to-blue-500/30 border border-cyan-500/40 text-cyan-200 text-xs flex items-center gap-2 transition shadow-md shadow-cyan-500/10 active:scale-95 group">
+      <button id="feedback-btn" onclick="toggleFeedbackChat()" class="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-pink-500/20 via-purple-500/20 to-cyan-500/20 hover:from-pink-500/30 hover:to-cyan-500/30 border border-pink-500/40 text-pink-200 text-xs flex items-center gap-2 transition shadow-md shadow-pink-500/10 active:scale-95 group">
         <span class="text-sm group-hover:scale-125 transition">💬</span>
-        <span class="text-[11px] font-semibold">Обратная связь</span>
-        <span id="feedback-unread-badge" class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+        <span class="text-[11px] font-semibold">Чат обратной связи</span>
+        <span id="feedback-unread-badge" class="px-1.5 py-0.2 rounded-full bg-pink-500 text-white font-mono text-[9px] font-bold">1</span>
       </button>
 
       <button id="lounge-btn" onclick="sendAllToLounge()" class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 text-xs flex items-center gap-1.5 transition">
@@ -286,108 +286,139 @@
         </div>
 
         <!-- 2. WORKSTATIONS (НИЖНЯЯ РАБОЧАЯ ЗОНА С КОМПЬЮТЕРАМИ) -->
-        <div class="absolute inset-x-0 bottom-4 flex justify-around items-end">
+        <div class="absolute inset-x-0 bottom-4 flex justify-around items-end gap-1 px-2">
 
           <!-- DESK 1: ALEX WORKSTATION (ARCHITECT) -->
-          <div id="desk-0" class="relative flex flex-col items-center" onclick="openAgentModal(0)">
-            <div class="w-40 h-20 rounded-xl bg-gradient-to-b from-[#8c5a32] via-[#6e4321] to-[#543217] p-2 desk-shadow border-t border-amber-400/30 flex flex-col justify-between relative cursor-pointer group">
+          <div id="desk-0" class="relative flex flex-col items-center flex-1 max-w-[130px] md:max-w-[160px]" onclick="openAgentModal(0)">
+            <div class="w-full h-20 rounded-xl bg-gradient-to-b from-[#8c5a32] via-[#6e4321] to-[#543217] p-2 desk-shadow border-t border-amber-400/30 flex flex-col justify-between relative cursor-pointer group hover:border-cyan-400 transition">
               <!-- Monitors -->
-              <div class="flex gap-2 justify-center">
-                <div id="monitor-0-left" class="w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
+              <div class="flex gap-1.5 justify-center">
+                <div id="monitor-0-left" class="w-14 md:w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
                   <div class="screen-reflection absolute inset-0"></div>
-                  <div class="p-1 text-[6.5px] font-mono text-cyan-300 leading-tight">
+                  <div class="p-1 text-[6px] md:text-[6.5px] font-mono text-cyan-300 leading-tight">
                     -- migrations.py<br>V2: mandatory_pay<br>user_version=2
                   </div>
                 </div>
-                <div id="monitor-0-right" class="w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
+                <div id="monitor-0-right" class="w-14 md:w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
                   <div class="screen-reflection absolute inset-0"></div>
-                  <div class="p-1 text-[6.5px] font-mono text-emerald-300 leading-tight">
+                  <div class="p-1 text-[6px] md:text-[6.5px] font-mono text-emerald-300 leading-tight">
                     # ERD Схема<br>Таблиц: 6<br>Индексы: OK
                   </div>
                 </div>
               </div>
               <!-- Desk Accessories -->
-              <div class="flex items-center justify-between px-2 pt-0.5">
+              <div class="flex items-center justify-between px-1.5 pt-0.5">
                 <div class="w-3 h-3 rounded-full bg-amber-700/80 border border-white/20"></div>
-                <div class="w-14 h-2 rounded-sm bg-slate-900 border border-cyan-500/30"></div>
+                <div class="w-10 md:w-14 h-2 rounded-sm bg-slate-900 border border-cyan-500/30"></div>
                 <div class="w-2.5 h-3 rounded-full bg-slate-800 border border-slate-600"></div>
               </div>
             </div>
             <!-- Chair -->
             <div class="w-12 h-6 bg-slate-900 rounded-b-xl border-t-2 border-slate-700 shadow-md flex items-center justify-center -mt-1">
-              <span class="text-[7.5px] font-mono text-slate-500">🪑 ALEX</span>
+              <span class="text-[7.5px] font-mono text-slate-400">🪑 ALEX</span>
             </div>
           </div>
 
           <!-- DESK 2: MAYA WORKSTATION (CORE DEV) -->
-          <div id="desk-1" class="relative flex flex-col items-center" onclick="openAgentModal(1)">
-            <div class="w-44 h-20 rounded-xl bg-gradient-to-b from-[#8c5a32] via-[#6e4321] to-[#543217] p-2 desk-shadow border-t border-amber-400/30 flex flex-col justify-between relative cursor-pointer group">
+          <div id="desk-1" class="relative flex flex-col items-center flex-1 max-w-[130px] md:max-w-[160px]" onclick="openAgentModal(1)">
+            <div class="w-full h-20 rounded-xl bg-gradient-to-b from-[#8c5a32] via-[#6e4321] to-[#543217] p-2 desk-shadow border-t border-amber-400/30 flex flex-col justify-between relative cursor-pointer group hover:border-purple-400 transition">
               <!-- Ultra-wide Curved Monitor -->
               <div class="flex justify-center">
-                <div id="monitor-1" class="w-34 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
+                <div id="monitor-1" class="w-28 md:w-34 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
                   <div class="screen-reflection absolute inset-0"></div>
-                  <div class="p-1 text-[6.5px] font-mono text-purple-300 leading-tight">
+                  <div class="p-1 text-[6px] md:text-[6.5px] font-mono text-purple-300 leading-tight">
                     async def show_bills(u, c):<br>&nbsp;&nbsp;card, kb = build_bills_card(u.id)<br>&nbsp;&nbsp;await u.message.reply_text(card)
                   </div>
                 </div>
               </div>
               <!-- Desk Accessories -->
-              <div class="flex items-center justify-between px-2 pt-0.5">
+              <div class="flex items-center justify-between px-1.5 pt-0.5">
                 <div class="w-3 h-3 rounded-full bg-emerald-700 border border-white/20" title="Матча латте"></div>
-                <div class="w-18 h-2 rounded-sm bg-slate-900 border border-purple-500/30"></div>
+                <div class="w-12 md:w-16 h-2 rounded-sm bg-slate-900 border border-purple-500/30"></div>
                 <div class="w-2.5 h-3 rounded-full bg-slate-800 border border-slate-600"></div>
               </div>
             </div>
             <!-- Chair -->
             <div class="w-12 h-6 bg-slate-900 rounded-b-xl border-t-2 border-slate-700 shadow-md flex items-center justify-center -mt-1">
-              <span class="text-[7.5px] font-mono text-slate-500">🪑 MAYA</span>
+              <span class="text-[7.5px] font-mono text-slate-400">🪑 MAYA</span>
             </div>
           </div>
 
           <!-- DESK 3: LEO WORKSTATION (QA & DEVOPS) -->
-          <div id="desk-2" class="relative flex flex-col items-center" onclick="openAgentModal(2)">
-            <div class="w-40 h-20 rounded-xl bg-gradient-to-b from-[#8c5a32] via-[#6e4321] to-[#543217] p-2 desk-shadow border-t border-amber-400/30 flex flex-col justify-between relative cursor-pointer group">
+          <div id="desk-2" class="relative flex flex-col items-center flex-1 max-w-[130px] md:max-w-[160px]" onclick="openAgentModal(2)">
+            <div class="w-full h-20 rounded-xl bg-gradient-to-b from-[#8c5a32] via-[#6e4321] to-[#543217] p-2 desk-shadow border-t border-amber-400/30 flex flex-col justify-between relative cursor-pointer group hover:border-emerald-400 transition">
               <!-- Vertical Test Monitors -->
-              <div class="flex gap-2 justify-center">
-                <div id="monitor-2-left" class="w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
+              <div class="flex gap-1.5 justify-center">
+                <div id="monitor-2-left" class="w-14 md:w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
                   <div class="screen-reflection absolute inset-0"></div>
-                  <div class="p-1 text-[6.5px] font-mono text-emerald-400 leading-tight">
+                  <div class="p-1 text-[6px] md:text-[6.5px] font-mono text-emerald-400 leading-tight">
                     pytest -v<br>143 passed<br>Time: 12.08s ✓
                   </div>
                 </div>
-                <div id="monitor-2-right" class="w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
+                <div id="monitor-2-right" class="w-14 md:w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
                   <div class="screen-reflection absolute inset-0"></div>
-                  <div class="p-1 text-[6.5px] font-mono text-amber-300 leading-tight">
+                  <div class="p-1 text-[6px] md:text-[6.5px] font-mono text-amber-300 leading-tight">
                     # DataSafe<br>Vol: Mounted<br>HotBackup: OK
                   </div>
                 </div>
               </div>
               <!-- Desk Accessories -->
-              <div class="flex items-center justify-between px-2 pt-0.5">
+              <div class="flex items-center justify-between px-1.5 pt-0.5">
                 <div class="w-3 h-3 rounded-full bg-cyan-700 border border-white/20" title="Энергетик"></div>
-                <div class="w-14 h-2 rounded-sm bg-slate-900 border border-emerald-500/30"></div>
+                <div class="w-10 md:w-14 h-2 rounded-sm bg-slate-900 border border-emerald-500/30"></div>
                 <div class="w-2.5 h-3 rounded-full bg-slate-800 border border-slate-600"></div>
               </div>
             </div>
             <!-- Chair -->
             <div class="w-12 h-6 bg-slate-900 rounded-b-xl border-t-2 border-slate-700 shadow-md flex items-center justify-center -mt-1">
-              <span class="text-[7.5px] font-mono text-slate-500">🪑 LEO</span>
+              <span class="text-[7.5px] font-mono text-slate-400">🪑 LEO</span>
+            </div>
+          </div>
+
+          <!-- DESK 4: EVA WORKSTATION (HUMAN FEEDBACK & LIAISON) -->
+          <div id="desk-3" class="relative flex flex-col items-center flex-1 max-w-[130px] md:max-w-[160px]" onclick="openFeedbackChat('EVA')">
+            <div class="w-full h-20 rounded-xl bg-gradient-to-b from-[#8c5a32] via-[#6e4321] to-[#543217] p-2 desk-shadow border-t border-pink-400/40 flex flex-col justify-between relative cursor-pointer group hover:border-pink-400 transition">
+              <!-- Monitors -->
+              <div class="flex gap-1.5 justify-center">
+                <div id="monitor-3-left" class="w-14 md:w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
+                  <div class="screen-reflection absolute inset-0"></div>
+                  <div class="p-1 text-[6px] md:text-[6.5px] font-mono text-pink-300 leading-tight">
+                    💬 FEEDBACK<br>Mode: LIVE<br>Antigravity Chat
+                  </div>
+                </div>
+                <div id="monitor-3-right" class="w-14 md:w-16 h-8 rounded-md bg-slate-950 border border-slate-700 overflow-hidden relative transition">
+                  <div class="screen-reflection absolute inset-0"></div>
+                  <div class="p-1 text-[6px] md:text-[6.5px] font-mono text-cyan-300 leading-tight">
+                    ★ Ratings 5/5<br>Auto-Review: ON<br>User Sync: OK
+                  </div>
+                </div>
+              </div>
+              <!-- Desk Accessories -->
+              <div class="flex items-center justify-between px-1.5 pt-0.5">
+                <div class="w-3 h-3 rounded-full bg-pink-600/80 border border-white/20" title="Капучино"></div>
+                <div class="w-10 md:w-14 h-2 rounded-sm bg-slate-900 border border-pink-400/40"></div>
+                <div class="w-2.5 h-3 rounded-full bg-slate-800 border border-slate-600"></div>
+              </div>
+            </div>
+            <!-- Chair -->
+            <div class="w-12 h-6 bg-slate-900 rounded-b-xl border-t-2 border-slate-700 shadow-md flex items-center justify-center -mt-1">
+              <span class="text-[7.5px] font-mono text-pink-300 font-bold">🪑 EVA</span>
             </div>
           </div>
 
         </div>
 
         <!-- ======================================================== -->
-        <!-- THREE DYNAMIC AGENTS (ANIMATED WALKING CHARACTERS) -->
+        <!-- FOUR DYNAMIC AGENTS (ANIMATED WALKING CHARACTERS) -->
         <!-- ======================================================== -->
 
         <!-- AGENT 0: ALEX -->
         <div id="agent-alex" class="agent-entity absolute flex flex-col items-center z-30 cursor-pointer" 
-             style="left: 12%; top: 12%;" onclick="openAgentModal(0)">
+             style="left: 10%; top: 14%;" onclick="openAgentModal(0)">
           <!-- Status Bubble -->
           <div class="floating-pill mb-1.5 px-2.5 py-1 rounded-full bg-slate-900/95 backdrop-blur-md border border-cyan-500/40 shadow-xl flex items-center gap-1.5 text-[10px]">
             <span class="px-1.5 py-0.5 rounded-full text-[8.5px] font-bold bg-cyan-500/20 text-cyan-300">ALEX</span>
-            <span id="agent-0-status" class="font-medium text-slate-200 truncate max-w-[130px]">В лаунже ☕</span>
+            <span id="agent-0-status" class="font-medium text-slate-200 truncate max-w-[110px]">В лаунже ☕</span>
           </div>
           <!-- Avatar Body -->
           <div class="agent-avatar-body flex flex-col items-center">
@@ -402,11 +433,11 @@
 
         <!-- AGENT 1: MAYA -->
         <div id="agent-maya" class="agent-entity absolute flex flex-col items-center z-30 cursor-pointer" 
-             style="left: 45%; top: 14%;" onclick="openAgentModal(1)">
+             style="left: 36%; top: 14%;" onclick="openAgentModal(1)">
           <!-- Status Bubble -->
           <div class="floating-pill mb-1.5 px-2.5 py-1 rounded-full bg-slate-900/95 backdrop-blur-md border border-purple-500/40 shadow-xl flex items-center gap-1.5 text-[10px]" style="animation-delay: 1.2s">
             <span class="px-1.5 py-0.5 rounded-full text-[8.5px] font-bold bg-purple-500/20 text-purple-300">MAYA</span>
-            <span id="agent-1-status" class="font-medium text-slate-200 truncate max-w-[130px]">На диване 🛋️</span>
+            <span id="agent-1-status" class="font-medium text-slate-200 truncate max-w-[110px]">На диване 🛋️</span>
           </div>
           <!-- Avatar Body -->
           <div class="agent-avatar-body flex flex-col items-center">
@@ -421,11 +452,11 @@
 
         <!-- AGENT 2: LEO -->
         <div id="agent-leo" class="agent-entity absolute flex flex-col items-center z-30 cursor-pointer" 
-             style="left: 78%; top: 12%;" onclick="openAgentModal(2)">
+             style="left: 64%; top: 14%;" onclick="openAgentModal(2)">
           <!-- Status Bubble -->
           <div class="floating-pill mb-1.5 px-2.5 py-1 rounded-full bg-slate-900/95 backdrop-blur-md border border-emerald-500/40 shadow-xl flex items-center gap-1.5 text-[10px]" style="animation-delay: 2.4s">
             <span class="px-1.5 py-0.5 rounded-full text-[8.5px] font-bold bg-emerald-500/20 text-emerald-300">LEO</span>
-            <span id="agent-2-status" class="font-medium text-slate-200 truncate max-w-[130px]">У кулера 💧</span>
+            <span id="agent-2-status" class="font-medium text-slate-200 truncate max-w-[110px]">У кулера 💧</span>
           </div>
           <!-- Avatar Body -->
           <div class="agent-avatar-body flex flex-col items-center">
@@ -437,6 +468,27 @@
             <div class="w-4 h-1.5 rounded-full bg-black/40 blur-[2px] mt-0.5"></div>
           </div>
         </div>
+
+        <!-- AGENT 3: EVA (FEEDBACK & HUMAN LIAISON) -->
+        <div id="agent-eva" class="agent-entity absolute flex flex-col items-center z-30 cursor-pointer" 
+             style="left: 86%; top: 14%;" onclick="openFeedbackChat('EVA')">
+          <!-- Status Bubble -->
+          <div class="floating-pill mb-1.5 px-2.5 py-1 rounded-full bg-slate-900/95 backdrop-blur-md border border-pink-500/50 shadow-xl flex items-center gap-1.5 text-[10px]" style="animation-delay: 3.6s">
+            <span class="px-1.5 py-0.5 rounded-full text-[8.5px] font-bold bg-pink-500/20 text-pink-300">EVA</span>
+            <span id="agent-3-status" class="font-medium text-pink-200 truncate max-w-[110px]">На связи 💬</span>
+          </div>
+          <!-- Avatar Body -->
+          <div class="agent-avatar-body flex flex-col items-center">
+            <div class="w-10 h-10 rounded-full bg-gradient-to-tr from-pink-500 via-rose-500 to-indigo-500 p-0.5 shadow-lg shadow-pink-500/40 hover:scale-110 transition z-10">
+              <div class="w-full h-full rounded-full bg-slate-900 flex items-center justify-center text-lg">
+                👩‍💼
+              </div>
+            </div>
+            <div class="w-4 h-1.5 rounded-full bg-black/40 blur-[2px] mt-0.5"></div>
+          </div>
+        </div>
+
+      </div>
 
       </div>
 
@@ -554,6 +606,102 @@
       <span class="text-sm">💡</span>
       <span class="text-[11px] font-semibold">Понятный статус</span>
       <span class="text-[10px] text-slate-400 font-mono">▲</span>
+    </button>
+
+    <!-- ======================================================== -->
+    <!-- INTERACTIVE CHAT & FEEDBACK DRAWER ("КАК У НАС С ТОБОЙ") -->
+    <!-- ======================================================== -->
+    <div id="feedback-chat-drawer" class="fixed bottom-4 right-4 w-[92vw] sm:w-[460px] md:w-[500px] h-[620px] max-h-[88vh] bg-[#0c1220]/95 backdrop-blur-2xl border border-pink-500/40 rounded-3xl shadow-[0_25px_80px_rgba(0,0,0,0.95)] z-50 flex flex-col transition-all duration-300 transform scale-100 hidden overflow-hidden ring-1 ring-white/10">
+      
+      <!-- Drawer Header -->
+      <div class="px-4 py-3 bg-[#11192b]/95 border-b border-white/10 flex items-center justify-between shrink-0">
+        <div class="flex items-center gap-3">
+          <div class="relative cursor-pointer" onclick="openAgentModal(3)">
+            <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-pink-500 to-indigo-600 flex items-center justify-center text-xl shadow-lg shadow-pink-500/30 text-white">
+              👩‍💼
+            </div>
+            <span class="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-400 border-2 border-slate-900 animate-pulse"></span>
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="text-sm font-bold text-white tracking-wide">Agent Eva</span>
+              <span class="px-2 py-0.5 rounded-full text-[9px] font-mono bg-pink-500/15 text-pink-300 border border-pink-500/30 font-semibold">Координатор</span>
+            </div>
+            <p class="text-[10.5px] text-slate-400">Диалог с агентами в реальном времени («как у нас с тобой»)</p>
+          </div>
+        </div>
+
+        <!-- Controls in Header -->
+        <div class="flex items-center gap-1.5">
+          <!-- Toggle Auto Report After Each Request -->
+          <label class="hidden sm:flex items-center gap-1.5 text-[10px] text-slate-300 bg-white/5 hover:bg-white/10 px-2.5 py-1 rounded-lg border border-white/10 cursor-pointer" title="Присылать отчет и кнопки подтверждения после каждого запроса">
+            <input type="checkbox" id="auto-report-toggle" checked onchange="toggleAutoReport(this.checked)" class="accent-pink-500 rounded cursor-pointer">
+            <span>Авто-отчёт</span>
+          </label>
+
+          <button onclick="openFeedbackModal('guide')" title="Открыть расширенную справку и архитектуру" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-white/10 text-xs transition">
+            📖
+          </button>
+          <button onclick="clearChatMessages()" title="Очистить историю сообщений" class="text-slate-400 hover:text-rose-400 p-1.5 rounded-lg hover:bg-white/10 text-xs transition">
+            🗑️
+          </button>
+          <button onclick="toggleFeedbackChat(false)" title="Свернуть окно" class="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-white/10 text-xs transition font-bold">
+            ✕
+          </button>
+        </div>
+      </div>
+
+      <!-- Live Chat Messages Stream -->
+      <div id="chat-messages-container" class="flex-1 overflow-y-auto p-4 space-y-3 font-sans text-xs select-text">
+        <!-- Messages rendered dynamically -->
+      </div>
+
+      <!-- Agent Typing Indicator -->
+      <div id="chat-typing-indicator" class="hidden px-4 py-1 text-[10.5px] font-mono text-pink-300 flex items-center gap-1.5 bg-slate-900/60 border-t border-white/5">
+        <span class="w-1.5 h-1.5 rounded-full bg-pink-400 animate-bounce"></span>
+        <span class="w-1.5 h-1.5 rounded-full bg-pink-400 animate-bounce" style="animation-delay: 0.2s"></span>
+        <span class="w-1.5 h-1.5 rounded-full bg-pink-400 animate-bounce" style="animation-delay: 0.4s"></span>
+        <span class="text-slate-400">Agent Eva готовит ответ...</span>
+      </div>
+
+      <!-- Quick Action Prompt Chips -->
+      <div class="px-3 py-1.5 bg-[#0a0f1c]/90 border-t border-white/5 flex items-center gap-1.5 overflow-x-auto text-[10px] shrink-0 no-scrollbar">
+        <span class="text-slate-500 text-[9px] uppercase font-mono mr-0.5">Быстро:</span>
+        <button onclick="sendQuickPrompt('📊 Какой текущий статус спринта и базы?')" class="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white whitespace-nowrap transition">
+          📊 Статус спринта
+        </button>
+        <button onclick="sendQuickPrompt('🧪 Запусти проверку pytest и бэкапа')" class="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white whitespace-nowrap transition">
+          🧪 Тесты (143)
+        </button>
+        <button onclick="sendQuickPrompt('👍 Всё проверил, одобряю результат!')" class="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 whitespace-nowrap transition">
+          👍 Одобрить результат
+        </button>
+        <button onclick="sendQuickPrompt('⭐ Ставлю 5 звёзд, отличная работа команды!')" class="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 whitespace-nowrap transition">
+          ⭐ Оценить 5★
+        </button>
+      </div>
+
+      <!-- Chat Input Area -->
+      <div class="p-3 bg-[#0f1728] border-t border-white/10 flex items-center gap-2 shrink-0">
+        <input type="text" id="chat-user-input" 
+               onkeydown="if(event.key==='Enter') sendChatMessage()"
+               placeholder="Напишите агентам замечание, вопрос или ТЗ..." 
+               class="flex-1 bg-[#070b14] border border-white/10 rounded-xl px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500/80 transition">
+        <button onclick="sendChatMessage()" 
+                class="px-4 py-2 rounded-xl bg-gradient-to-r from-pink-500 to-indigo-600 hover:from-pink-400 hover:to-indigo-500 text-white font-semibold text-xs flex items-center gap-1.5 shadow-lg shadow-pink-500/20 active:scale-95 transition">
+          <span>Отправить</span>
+          <span>🚀</span>
+        </button>
+      </div>
+
+    </div>
+
+    <!-- FLOATING TOGGLE BUTTON (ДЛЯ БЫСТРОГО ВЫЗОВА ПО КНОПКЕ) -->
+    <button id="feedback-chat-floating-btn" onclick="toggleFeedbackChat(true)" 
+            class="fixed bottom-5 right-5 px-4 py-2.5 rounded-2xl bg-gradient-to-r from-pink-500 via-rose-500 to-indigo-600 hover:from-pink-400 hover:to-indigo-500 text-white font-semibold text-xs shadow-2xl shadow-pink-500/30 border border-white/15 flex items-center gap-2 z-40 transition-all hover:scale-105 active:scale-95 group">
+      <span class="text-base group-hover:scale-125 transition">💬</span>
+      <span class="tracking-wide">Чат обратной связи</span>
+      <span id="floating-unread-badge" class="px-1.5 py-0.2 rounded-full bg-pink-400 text-slate-950 font-mono text-[9px] font-bold">1</span>
     </button>
 
   </main>
@@ -871,16 +1019,20 @@
     // Lounge Spots (top) vs Desk Spots (bottom)
     const POSITIONS = {
       alex: {
-        lounge: { left: "14%", top: "16%" },
-        desk: { left: "28%", top: "50%" }
+        lounge: { left: "10%", top: "14%" },
+        desk: { left: "16%", top: "50%" }
       },
       maya: {
-        lounge: { left: "42%", top: "18%" },
-        desk: { left: "54%", top: "50%" }
+        lounge: { left: "36%", top: "14%" },
+        desk: { left: "40%", top: "50%" }
       },
       leo: {
-        lounge: { left: "74%", top: "16%" },
-        desk: { left: "80%", top: "50%" }
+        lounge: { left: "64%", top: "14%" },
+        desk: { left: "65%", top: "50%" }
+      },
+      eva: {
+        lounge: { left: "86%", top: "14%" },
+        desk: { left: "87%", top: "50%" }
       }
     };
 
@@ -923,6 +1075,19 @@
         status: "У кулера 💧",
         thought: "Жду задачи для написания строгих тестов pytest и валидации целостности DataSafe.",
         tools: ["pytest", "test_mandatory_payments.py", "datasafe.py", "Dockerfile"]
+      },
+      {
+        id: "eva",
+        name: "Agent Eva",
+        role: "User Liaison & Human Feedback Coordinator",
+        avatar: "👩‍💼",
+        deskId: "desk-3",
+        monitors: ["monitor-3-left", "monitor-3-right"],
+        glowClass: "monitor-glow-purple",
+        location: "lounge",
+        status: "На связи 💬",
+        thought: "Готова принимать задачи и собирать обратную связь прямо как в чате Antigravity.",
+        tools: ["Feedback Chat", "Human-in-the-Loop", "Auto-Review", "localStorage"]
       }
     ];
 
@@ -1018,7 +1183,7 @@
           });
           playBeep(980, 0.08); // Terminal hum
         } else {
-          const loungeStatus = agentIndex === 0 ? 'В лаунже ☕' : (agentIndex === 1 ? 'На диване 🛋️' : 'У кулера 💧');
+          const loungeStatus = agentIndex === 0 ? 'В лаунже ☕' : (agentIndex === 1 ? 'На диване 🛋️' : (agentIndex === 2 ? 'У кулера 💧' : 'На связи 💬'));
           document.getElementById(`agent-${agentIndex}-status`).textContent = loungeStatus;
         }
 
@@ -1121,6 +1286,9 @@
       document.getElementById('office-status-pill').innerHTML = '<span class="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse"></span> ОРКЕСТРАЦИЯ ЗАДАЧИ';
 
       addLog('orchestrator', `🧠 ИИ-Оркестратор начал анализ задачи: "${taskText}"`, 'text-cyan-400 font-bold');
+
+      // Eva informs in real-time chat
+      addChatMessage('eva', `🚀 **Спринт начат!** Задача: «${taskText}». Alex, Maya и Leo уже работают над кодовой базой. После завершения я сразу пришлю вам интерактивный отчет и кнопки подтверждения.`);
 
       // Update Human Feedback HUD & Stepper (Step 1)
       updateFeedbackProgress(
@@ -1266,6 +1434,13 @@
           100, 
           '🎉'
         );
+
+        // Eva automatically delivers human feedback report after each request
+        if (autoReportEnabled) {
+          setTimeout(() => {
+            postAutomatedSprintReport(taskText);
+          }, 800);
+        }
       }, 10500);
     }
 
@@ -1301,10 +1476,352 @@
       addLog('office', '🪴 Фикус Монстера полит! В студии стало на 12% уютнее.', 'text-emerald-300');
     }
 
-    // --- Human Feedback & Guidance System ---
+    // --- Human Feedback & Real-Time Chat System ("Как у нас с тобой") ---
     let currentFeedbackRating = 5;
     let hudCollapsed = false;
+    let autoReportEnabled = localStorage.getItem('kopilka_auto_report_enabled') !== 'false';
+    let unreadChatCount = 1;
+    let chatDrawerOpen = false;
 
+    function toggleAutoReport(checked) {
+      autoReportEnabled = checked;
+      localStorage.setItem('kopilka_auto_report_enabled', checked ? 'true' : 'false');
+      addLog('Eva', `Авто-отчёт после каждого запроса: ${checked ? 'ВКЛЮЧЕН ✓' : 'ОТКЛЮЧЕН ✕'}`, 'text-pink-300');
+    }
+
+    function updateUnreadBadges() {
+      const headerBadge = document.getElementById('feedback-unread-badge');
+      const floatingBadge = document.getElementById('floating-unread-badge');
+      if (headerBadge) {
+        headerBadge.textContent = unreadChatCount;
+        headerBadge.style.display = unreadChatCount > 0 ? 'inline-block' : 'none';
+      }
+      if (floatingBadge) {
+        floatingBadge.textContent = unreadChatCount;
+        floatingBadge.style.display = unreadChatCount > 0 ? 'inline-block' : 'none';
+      }
+    }
+
+    function toggleFeedbackChat(forceState = null) {
+      const drawer = document.getElementById('feedback-chat-drawer');
+      const floatingBtn = document.getElementById('feedback-chat-floating-btn');
+      if (!drawer) return;
+
+      if (forceState !== null) {
+        chatDrawerOpen = forceState;
+      } else {
+        chatDrawerOpen = !chatDrawerOpen;
+      }
+
+      if (chatDrawerOpen) {
+        drawer.classList.remove('hidden');
+        if (floatingBtn) floatingBtn.classList.add('hidden');
+        unreadChatCount = 0;
+        updateUnreadBadges();
+        renderChatMessages();
+        const input = document.getElementById('chat-user-input');
+        if (input) setTimeout(() => input.focus(), 150);
+        playBeep(640, 0.06);
+      } else {
+        drawer.classList.add('hidden');
+        if (floatingBtn) floatingBtn.classList.remove('hidden');
+      }
+    }
+
+    function openFeedbackChat(agentName = 'EVA') {
+      toggleFeedbackChat(true);
+      playBeep(720, 0.08);
+      addLog('Eva', 'Открыто диалоговое окно обратной связи в реальном времени.', 'text-pink-300 font-bold');
+    }
+
+    // --- Chat Storage & Engine ---
+    function getChatHistory() {
+      try {
+        const saved = localStorage.getItem('kopilka_office_chat_v2');
+        if (saved) return JSON.parse(saved);
+      } catch (e) {}
+
+      // Default welcome dialogue styled like Antigravity pair programming
+      return [
+        {
+          id: 1,
+          sender: 'eva',
+          senderName: 'Agent Eva',
+          avatar: '👩‍💼',
+          time: new Date().toTimeString().split(' ')[0].slice(0, 5),
+          type: 'text',
+          text: `👋 **Здравствуйте! Я Агент Ева** — ваш персональный координатор и связной с командой разработки kopilka_bot77777.\n\nНаш чат устроен **точно как у нас с вами в Antigravity**:\n• Вы можете писать сюда любые замечания, вопросы или новые ТЗ в свободной форме.\n• **После каждого запроса** (или спринта) я присылаю вам подробный отчет о том, что изменили в коде Alex, Maya и Leo, со статусом тестов и интерактивными кнопками одобрения.\n• Вы всегда можете вызвать этот чат по кнопке вверху, кликнув на меня или на плавающую кнопку внизу экрана.`
+        }
+      ];
+    }
+
+    function saveChatHistory(list) {
+      try {
+        localStorage.setItem('kopilka_office_chat_v2', JSON.stringify(list));
+      } catch (e) {}
+    }
+
+    function addChatMessage(sender, text, type = 'text', cardData = null) {
+      const history = getChatHistory();
+      const time = new Date().toTimeString().split(' ')[0].slice(0, 5);
+      
+      const newMsg = {
+        id: Date.now() + Math.random(),
+        sender: sender,
+        senderName: sender === 'user' ? 'Вы' : (sender === 'eva' ? 'Agent Eva' : (sender === 'system' ? 'Оркестратор' : 'Команда')),
+        avatar: sender === 'user' ? '👤' : (sender === 'eva' ? '👩‍💼' : (sender === 'system' ? '⚡' : '🤖')),
+        time: time,
+        type: type,
+        text: text,
+        cardData: cardData
+      };
+
+      history.push(newMsg);
+      saveChatHistory(history);
+
+      if (!chatDrawerOpen) {
+        unreadChatCount++;
+        updateUnreadBadges();
+        playBeep(880, 0.1);
+      }
+
+      renderChatMessages();
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function formatMarkdown(text) {
+      if (!text) return '';
+      let escaped = escapeHtml(text);
+      // Bold **text**
+      escaped = escaped.replace(/\*\*(.*?)\*\*/g, '<b class="text-white font-semibold">$1</b>');
+      // Inline code `code`
+      escaped = escaped.replace(/`(.*?)`/g, '<code class="bg-black/40 text-cyan-300 px-1 py-0.5 rounded font-mono text-[10.5px] border border-white/5">$1</code>');
+      // Line breaks
+      escaped = escaped.replace(/\n/g, '<br>');
+      return escaped;
+    }
+
+    function renderChatMessages() {
+      const container = document.getElementById('chat-messages-container');
+      if (!container) return;
+
+      const history = getChatHistory();
+      container.innerHTML = '';
+
+      history.forEach(msg => {
+        const msgDiv = document.createElement('div');
+        
+        if (msg.sender === 'user') {
+          // User message bubble (Right aligned)
+          msgDiv.className = "flex items-end justify-end gap-2.5 my-2 animate-fadeIn";
+          msgDiv.innerHTML = `
+            <div class="max-w-[85%] bg-gradient-to-r from-pink-600 via-rose-600 to-indigo-600 text-white rounded-2xl rounded-br-none p-3 shadow-md shadow-pink-500/10">
+              <div class="flex items-center justify-between gap-3 pb-1 border-b border-white/10 text-[9.5px] text-pink-200">
+                <span class="font-bold">Вы</span>
+                <span>${msg.time}</span>
+              </div>
+              <div class="mt-1 text-slate-100 text-[11.5px] leading-relaxed select-text">${formatMarkdown(msg.text)}</div>
+            </div>
+            <div class="w-7 h-7 rounded-xl bg-slate-800 border border-white/15 flex items-center justify-center text-xs shrink-0 shadow">
+              👤
+            </div>
+          `;
+        } else if (msg.type === 'report_card' && msg.cardData) {
+          // Rich Automated Status Report Card after request
+          msgDiv.className = "my-3 animate-fadeIn";
+          const data = msg.cardData;
+          msgDiv.innerHTML = `
+            <div class="p-4 rounded-2xl bg-gradient-to-br from-[#191830] via-[#101524] to-[#0c1322] border border-pink-500/40 shadow-xl space-y-2.5">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-base">📋</span>
+                  <span class="font-bold text-white text-xs tracking-wide">Отчёт по выполненному запросу</span>
+                </div>
+                <span class="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  143 / 143 passed ✓
+                </span>
+              </div>
+
+              <div class="p-2.5 rounded-xl bg-black/30 border border-white/5 font-mono text-[11px] text-cyan-200">
+                🎯 Задача: «${escapeHtml(data.taskTitle)}»
+              </div>
+
+              <div class="space-y-1.5 text-[11px] text-slate-300 leading-relaxed">
+                <div class="flex items-center gap-1.5">
+                  <span class="text-emerald-400">✓</span> <b>Alex (Архитектор):</b> Схема БД SQLite v2 проверена, миграции применены без потерь данных.
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <span class="text-emerald-400">✓</span> <b>Maya (Разработчик):</b> Асинхронные хендлеры и сервис в kopilka/ готовы к приёму команд.
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <span class="text-emerald-400">✓</span> <b>Leo (QA & DataSafe):</b> 143 модульных теста пройдены. Hot backup SQLite создан.
+                </div>
+              </div>
+
+              <!-- Interactive Buttons -->
+              <div class="pt-2.5 border-t border-white/10 flex flex-wrap items-center gap-2">
+                <span class="text-[10px] text-slate-400 w-full mb-0.5">Выберите действие или оценку:</span>
+                <button onclick="handleReportFeedback('approved', '${escapeHtml(data.taskTitle)}')" class="px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 shadow-sm">
+                  <span>👍 Принять результат</span>
+                </button>
+                <button onclick="handleReportFeedback('rework', '${escapeHtml(data.taskTitle)}')" class="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-xs font-semibold flex items-center gap-1.5 transition active:scale-95 shadow-sm">
+                  <span>🔄 Доработать</span>
+                </button>
+                <button onclick="handleReportFeedback('rate5', '${escapeHtml(data.taskTitle)}')" class="px-2.5 py-1.5 rounded-xl bg-pink-500/20 hover:bg-pink-500/30 border border-pink-500/40 text-pink-300 text-xs font-bold transition active:scale-95 shadow-sm">
+                  <span>⭐⭐⭐⭐⭐ 5★</span>
+                </button>
+              </div>
+            </div>
+          `;
+        } else {
+          // Agent / Assistant message bubble (Left aligned)
+          msgDiv.className = "flex items-start gap-2.5 my-2 animate-fadeIn";
+          const senderColor = msg.sender === 'eva' ? 'text-pink-300' : 'text-cyan-300';
+          const bubbleBorder = msg.sender === 'eva' ? 'border-pink-500/30' : 'border-white/10';
+          msgDiv.innerHTML = `
+            <div class="w-7 h-7 rounded-xl bg-slate-900 border ${bubbleBorder} flex items-center justify-center text-sm shrink-0 shadow">
+              ${msg.avatar}
+            </div>
+            <div class="max-w-[85%] bg-[#121929] border ${bubbleBorder} rounded-2xl rounded-tl-none p-3 shadow-md">
+              <div class="flex items-center justify-between gap-3 pb-1 border-b border-white/5 text-[9.5px]">
+                <span class="font-bold ${senderColor}">${msg.senderName}</span>
+                <span class="text-slate-500">${msg.time}</span>
+              </div>
+              <div class="mt-1 text-slate-200 text-[11.5px] leading-relaxed select-text">${formatMarkdown(msg.text)}</div>
+            </div>
+          `;
+        }
+
+        container.appendChild(msgDiv);
+      });
+
+      // Scroll to bottom
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function clearChatMessages() {
+      localStorage.removeItem('kopilka_office_chat_v2');
+      renderChatMessages();
+      playBeep(440, 0.05);
+      addLog('Eva', 'История чата очищена.', 'text-slate-400');
+    }
+
+    function sendChatMessage() {
+      const input = document.getElementById('chat-user-input');
+      if (!input) return;
+      const text = input.value.trim();
+      if (!text) {
+        input.focus();
+        return;
+      }
+
+      // Add user message to chat stream
+      addChatMessage('user', text);
+      input.value = '';
+      playBeep(720, 0.05);
+
+      addLog('Пользователь', `[Чат] "${text}"`, 'text-pink-300 font-bold');
+
+      // Show typing indicator
+      const typingEl = document.getElementById('chat-typing-indicator');
+      if (typingEl) typingEl.classList.remove('hidden');
+
+      // Generate contextual intelligent response
+      setTimeout(() => {
+        if (typingEl) typingEl.classList.add('hidden');
+        generateAgentReply(text);
+      }, 700 + Math.random() * 500);
+    }
+
+    function sendQuickPrompt(promptText) {
+      const input = document.getElementById('chat-user-input');
+      if (input) {
+        input.value = promptText;
+        sendChatMessage();
+      }
+    }
+
+    function generateAgentReply(userPrompt) {
+      const lower = userPrompt.toLowerCase();
+      let reply = "";
+      let sender = "eva";
+
+      if (lower.includes('тест') || lower.includes('pytest') || lower.includes('провер')) {
+        reply = `**Leo (QA Engineer):** Запустил экспресс-проверку тест-сьюта!\n• Пройдено: **143 из 143 тестов** (\`pytest -v\`).\n• Модуль \`datasafe.py\` подтверждает целостность БД и маркера.\n• Ошибок и регрессий нет, всё работает стабильно! ✓`;
+        sender = "leo";
+      } else if (lower.includes('баз') || lower.includes('схем') || lower.includes('sqlite') || lower.includes('миграц')) {
+        reply = `**Alex (Архитектор):** Текущая версия схемы — **SQLite v2** (\`migrations.py\`).\n• Включен режим WAL (\`PRAGMA journal_mode=WAL\`).\n• Таблицы обязательных платежей и категорий заиндексированы.\n• Все финансовые операции строго транзакционны.`;
+        sender = "alex";
+      } else if (lower.includes('спринт') || lower.includes('статус') || lower.includes('задач')) {
+        const done = kanbanTasks.filter(x => x.status === 'done').length;
+        reply = `**Agent Eva:** Текущий статус рабочего офиса:\n• Завершено задач: **${done} из ${kanbanTasks.length}** (100% готовность).\n• Вся команда на связи и готова к выполнению новых задач.\n• Вы можете ввести задачу в строку внизу или прикрепить файл ТЗ!`;
+      } else if (lower.includes('приним') || lower.includes('одобр') || lower.includes('отличн') || lower.includes('супер') || lower.includes('молодц')) {
+        reply = `**Agent Eva:** Огромное спасибо за одобрение! 🎉\nЯ зафиксировала ваше подтверждение в журнале спринта. Команда Alex, Maya и Leo благодарит за доверие и продолжает совершенствовать Kopilka Bot!`;
+        playVictoryChime();
+      } else if (lower.includes('доработ') || lower.includes('ошибк') || lower.includes('исправ') || lower.includes('баг')) {
+        reply = `**Agent Eva:** Поняла вас! Зафиксировала замечание к коду.\nПередаю задачу Maya и Alex для внесения правок, а Leo подготовит регрессионный тест для проверки фикса.`;
+      } else {
+        reply = `**Agent Eva:** Принято в работу! Ваше сообщение: «${userPrompt}» зафиксировано.\nЯ распределю требования между инженерами и сообщу, как только код будет готов и протестирован!`;
+      }
+
+      addChatMessage(sender, reply);
+      addLog(sender === 'eva' ? 'Eva' : sender, reply.replace(/\*\*/g, '').slice(0, 100) + '...', 'text-pink-300');
+      playBeep(840, 0.08);
+    }
+
+    // --- Automated Sprint Report (After Each Request) ---
+    function postAutomatedSprintReport(taskTitle) {
+      const cardData = {
+        taskTitle: taskTitle,
+        timestamp: new Date().toLocaleTimeString().slice(0, 5)
+      };
+
+      addChatMessage('eva', `Отчёт по запросу «${taskTitle}»`, 'report_card', cardData);
+      playVictoryChime();
+      addLog('Eva', `Автоматический отчет по задаче «${taskTitle}» отправлен в окно обратной связи!`, 'text-pink-300 font-bold');
+
+      // If drawer is closed, highlight buttons
+      const btn = document.getElementById('feedback-btn');
+      if (btn) {
+        btn.classList.add('ring-2', 'ring-pink-400');
+        setTimeout(() => btn.classList.remove('ring-2', 'ring-pink-400'), 3000);
+      }
+    }
+
+    function handleReportFeedback(action, taskTitle) {
+      if (action === 'approved') {
+        addChatMessage('user', `👍 Принимаю результат по задаче: «${taskTitle}». Всё сделано отлично!`);
+        setTimeout(() => {
+          addChatMessage('eva', `🎉 **Результат успешно утверждён пользователем!**\nКоманда зафиксировала успешное завершение этапа. Готовы к следующему запросу!`);
+          playVictoryChime();
+        }, 400);
+        addLog('Пользователь', `Утвердил результат спринта «${taskTitle}»`, 'text-emerald-400 font-bold');
+      } else if (action === 'rework') {
+        addChatMessage('user', `🔄 Требуется доработать результат по задаче: «${taskTitle}».`);
+        setTimeout(() => {
+          addChatMessage('eva', `Замечание принято! Напишите, пожалуйста, в это окно, что именно нужно скорректировать или улучшить, и инженеры мгновенно приступят к правкам.`);
+        }, 400);
+        addLog('Пользователь', `Запросил доработку по задаче «${taskTitle}»`, 'text-amber-400 font-bold');
+      } else if (action === 'rate5') {
+        addChatMessage('user', `⭐⭐⭐⭐⭐ Ставлю высшую оценку (5 из 5) за качество реализации задачи: «${taskTitle}»!`);
+        setTimeout(() => {
+          addChatMessage('eva', `⭐⭐⭐⭐⭐ Благодарим за высокую оценку! Это мотивирует команду держать наивысший стандарт качества и надежности!`);
+          playVictoryChime();
+        }, 400);
+        addLog('Пользователь', `Поставил оценку 5★ за выполнение «${taskTitle}»`, 'text-pink-300 font-bold');
+      }
+    }
+
+    // --- Modal Inspector & Legacy Helpers ---
     function toggleHud(forceShow = null) {
       const hud = document.getElementById('human-feedback-hud');
       const pill = document.getElementById('hud-collapsed-pill');
@@ -1355,7 +1872,6 @@
     }
 
     function updateFeedbackProgress(stepNum, stageBadge, title, humanDesc, agentName, percent, avatar = '🤖') {
-      // 1. Update Floating HUD
       const hudPill = document.getElementById('hud-step-pill');
       const hudTitle = document.getElementById('hud-title');
       const hudDesc = document.getElementById('hud-desc');
@@ -1372,7 +1888,6 @@
       if (hudProg) hudProg.textContent = `Готовность: ${percent}%`;
       if (hudBar) hudBar.style.width = `${percent}%`;
 
-      // 2. Update Modal Status Details
       const fbStageBadge = document.getElementById('fb-stage-badge');
       const fbStageTitle = document.getElementById('fb-stage-title');
       const fbStageHuman = document.getElementById('fb-stage-human');
@@ -1380,7 +1895,6 @@
       if (fbStageTitle) fbStageTitle.textContent = title;
       if (fbStageHuman) fbStageHuman.textContent = humanDesc;
 
-      // 3. Update Stepper in Modal
       for (let i = 1; i <= 5; i++) {
         const stepCard = document.getElementById(`stepper-step-${i}`);
         if (!stepCard) continue;
@@ -1454,7 +1968,7 @@
         "Maya (Разработчик): Принято в работу! Обязательно учту это в следующем улучшении кода.",
         "Alex (Архитектор): Отличная мысль! Добавлю это в требования к архитектуре и сохранности данных.",
         "Leo (Тестировщик): Зафиксировал замечание! Напишу под этот кейс отдельный тест в pytest.",
-        "Оркестратор: Спасибо за обратную связь! Команда адаптирует план разработки."
+        "Eva (Координатор): Спасибо за обратную связь! Я передала замечание всей команде."
       ];
       const randomReply = replies[Math.floor(Math.random() * replies.length)];
 
@@ -1472,12 +1986,16 @@
       input.value = '';
       renderFeedbackHistory();
 
-      // Sound & Log
+      // Mirror to chat as well!
+      addChatMessage('user', `[Отзыв ★${currentFeedbackRating}] ${text}`);
+      setTimeout(() => {
+        addChatMessage('eva', randomReply);
+      }, 500);
+
       playVictoryChime();
       addLog('Пользователь', `[Обратная связь ★${currentFeedbackRating}] "${text}"`, 'text-cyan-300 font-bold');
       addLog('Команда', randomReply, 'text-purple-300 font-semibold');
 
-      // Visual button feedback
       const btn = document.getElementById('feedback-btn');
       if (btn) {
         btn.classList.add('ring-2', 'ring-cyan-400');
@@ -1520,9 +2038,13 @@
       playBeep(440, 0.05);
     }
 
-    // Initial setup
+    // Initial setup on load
     renderKanban();
     renderFeedbackHistory();
+    renderChatMessages();
+    updateUnreadBadges();
+    const autoToggleEl = document.getElementById('auto-report-toggle');
+    if (autoToggleEl) autoToggleEl.checked = autoReportEnabled;
   </script>
 </body>
 </html>

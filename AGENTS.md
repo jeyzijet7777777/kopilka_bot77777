@@ -44,6 +44,13 @@ kopilka_bot77777/
 ├── env.example                # Шаблон переменных окружения
 ├── Dockerfile & .dockerignore # Контейнеризация для продакшна
 ├── conftest.py                # Фикстуры и заглушки Telegram API для тестов
+├── office/                    # Интерактивная веб-студия (панель агентов и чат обратной связи)
+│   └── index.html             # UI офиса: анимация агентов, чат обратной связи, канбан
+├── .agents/agents/            # Специализированные ИИ-агенты Antigravity
+│   ├── architect.md           # Agent Alex: архитектура БД и фичей
+│   ├── developer.md           # Agent Maya: реализация на PTB v21
+│   ├── qa-engineer.md         # Agent Leo: тесты pytest и datasafe
+│   └── feedback-agent.md      # Agent Eva: чат обратной связи "как у нас с тобой"
 └── test_*.py                  # Набор тестов на целостность, отчеты и логику
 ```
 
