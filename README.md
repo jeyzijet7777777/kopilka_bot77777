@@ -174,6 +174,5 @@ Docker: `docker build -t kopilka . && docker run -d --env-file .env -v kopilka_d
 
 ## Тесты
 
-`pip install -r requirements-dev.txt && python -m pytest tests`. Тесты работают на временных SQLite-базах;
-`tests/test_step2_features.py` — правка трат, графики прошлых месяцев, предупреждения, недельная сводка и категории.
-`tests/legacy_bot.py` — исходная версия `bot.py`, с которой сравниваются схема и расчёты.
+`pip install -r requirements-dev.txt && pytest`. Тесты работают на временных SQLite-базах:
+проверяют правку трат, графики, предупреждения, недельные сводки, категории и безопасность миграций.

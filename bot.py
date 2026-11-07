@@ -905,14 +905,31 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.By
 # --- Клавиатуры ---
 MAIN_KB = ReplyKeyboardMarkup(
     [
-        ["📊 Сегодня", "📅 Месяц", "🏦 В копилку"],
-        ["💸 Из копилки", "📈 График", "📥 Скачать Excel"],
-        ["⚙️ Настройки", "↩️ Отменить последнюю", "📚 Месяцы"],
-        ["🏷 Категории", "🧾 Траты", "🏠 Счета"],
+        ["📊 Сегодня", "📅 Месяц"],
+        ["🏠 Счета", "🏦 Копилка"],
+        ["🧾 Траты", "🏷 Категории"],
+        ["⚙️ Меню & Ещё", "↩️ Отменить"],
     ],
     resize_keyboard=True,
 )
-MENU_TEXTS = {b for row in MAIN_KB.keyboard for b in (x.text if hasattr(x, "text") else x for x in row)}
+MENU_TEXTS = {
+    b for row in MAIN_KB.keyboard for b in (x.text if hasattr(x, "text") else x for x in row)
+} | {
+    "🏦 В копилку",
+    "💸 Из копилки",
+    "📈 График",
+    "📥 Скачать Excel",
+    "⚙️ Настройки",
+    "↩️ Отменить последнюю",
+    "📚 Месяцы",
+    "🏷 Категории",
+    "🧾 Траты",
+    "🏠 Счета",
+    "⚙️ Меню & Ещё",
+    "⚙️ Меню",
+    "⚙️ Ещё",
+    "↩️ Отменить",
+}
 
 
 def mode_markup(prefix: str):
@@ -1887,9 +1904,52 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ввод отменён.", reply_markup=MAIN_KB)
 
 
+def menu_hub_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📈 Графика трат", callback_data="chart_overview"),
+            InlineKeyboardButton("📥 Скачать Excel", callback_data="menu_excel"),
+        ],
+        [
+            InlineKeyboardButton("🏷 Траты по категориям", callback_data="menu_categories"),
+            InlineKeyboardButton("📚 Архив месяцев", callback_data="menu_months"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Настройки бюджета", callback_data="menu_settings"),
+            InlineKeyboardButton("↩️ Отменить последнюю", callback_data="menu_undo"),
+        ],
+    ])
+
+
+async def show_menu_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "⚙️ *Меню и дополнительные сервисы*\n\n"
+        "Выберите нужный раздел или отчёт:\n"
+        "• 📈 *Графика* — визуальные диаграммы расходов и остатка\n"
+        "• 📥 *Excel* — полная выгрузка персональной таблицы\n"
+        "• 🏷 *Категории* — подробная разбивка расходов по статьям\n"
+        "• 📚 *Архив* — сравнение и история прошлых месяцев\n"
+        "• ⚙️ *Настройки* — доходы, плановая копилка и время отчётов\n"
+        "• ↩️ *Отмена* — быстрый откат последней добавленной траты\n\n"
+        "💡 _Подсказка: чтобы записать трату, просто отправьте, например: `450 продукты`._"
+    )
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=menu_hub_kb())
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=menu_hub_kb())
+
+
 async def show_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text, markup = build_day_report(user_id, today_date())
+    today_d = today_date()
+    today_nav = [
+        [
+            InlineKeyboardButton("🔄 Обновить", callback_data="today_refresh"),
+            InlineKeyboardButton("📈 График", callback_data="chart_overview"),
+            InlineKeyboardButton("🏠 Счета", callback_data="bills_refresh"),
+        ]
+    ]
+    text, markup = build_day_report(user_id, today_d, extra_rows=today_nav)
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
 
 
@@ -1988,7 +2048,20 @@ async def show_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, r in enumerate(top_rows, 1):
             lines.append(f"{i}. {esc(r['category'])} — {fmt_money(r['total'])}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=MAIN_KB)
+    month_kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📈 Графики", callback_data="chart_overview"),
+            InlineKeyboardButton("📥 Excel", callback_data="menu_excel"),
+        ],
+        [
+            InlineKeyboardButton("🏷 Категории", callback_data="menu_categories"),
+            InlineKeyboardButton("📚 Архив месяцев", callback_data="menu_months"),
+        ],
+        [
+            InlineKeyboardButton("🏠 Обязательные счета", callback_data="bills_refresh"),
+        ],
+    ])
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=month_kb)
 
 
 async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2706,7 +2779,11 @@ def build_piggy_history(user_id: int):
         f"_Плановые отчисления: {fmt_money(info['save'])} в месяц_",
         "",
     ]
-    buttons = []
+    action_row = [
+        InlineKeyboardButton("➕ Пополнить", callback_data="piggy_topup_btn"),
+        InlineKeyboardButton("💸 Снять", callback_data="piggy_withdraw_btn"),
+    ]
+    buttons = [action_row]
     if rows:
         lines.append("*Последние операции* (нажмите, чтобы отменить):")
         for r in rows:
@@ -2716,8 +2793,8 @@ def build_piggy_history(user_id: int):
             title = f"❌ {d} {sign}{int(abs(r['amount']))}₽ {r['comment']}"
             buttons.append([InlineKeyboardButton(title[:40], callback_data=f"hdeltop_{r['id']}")])
     else:
-        lines.append("_Операций пока нет. Пополнить: кнопка «🏦 В копилку» или `+500`._")
-    return "\n".join(lines), InlineKeyboardMarkup(buttons) if buttons else None
+        lines.append("_Операций пока нет. Нажмите «➕ Пополнить» или отправьте `+500`._")
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 async def show_piggy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2763,19 +2840,20 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     try:
         await app.bot.set_my_commands([
-            BotCommand("today", "Траты за сегодня"),
-            BotCommand("week", "Траты за 7 дней"),
-            BotCommand("month", "Сводка за месяц"),
-            BotCommand("months", "История прошлых месяцев"),
-            BotCommand("history", "Последние траты: изменить или удалить"),
-            BotCommand("bills", "Счета и обязательные траты"),
-            BotCommand("categories", "Расходы по категориям и месяцам"),
-            BotCommand("chart", "График"),
-            BotCommand("excel", "Скачать Excel"),
-            BotCommand("piggy", "Копилка и её история"),
-            BotCommand("settings", "Настройки"),
-            BotCommand("undo", "Отменить последнюю операцию"),
-            BotCommand("help", "Как вводить траты"),
+            BotCommand("today", "📊 Сводка за сегодня"),
+            BotCommand("month", "📅 Сводка за месяц"),
+            BotCommand("bills", "🏠 Счета и обязательные траты"),
+            BotCommand("piggy", "🏦 Копилка и операции"),
+            BotCommand("history", "🧾 Последние траты: правка/удаление"),
+            BotCommand("categories", "🏷 Расходы по категориям"),
+            BotCommand("menu", "⚙️ Меню и сервисы"),
+            BotCommand("chart", "📈 Графика и диаграммы"),
+            BotCommand("excel", "📥 Скачать Excel-отчет"),
+            BotCommand("week", "📆 Траты за 7 дней"),
+            BotCommand("months", "📚 Архив прошлых месяцев"),
+            BotCommand("undo", "↩️ Отменить последнюю операцию"),
+            BotCommand("settings", "⚙️ Настройки бюджета"),
+            BotCommand("help", "ℹ️ Справка и подсказки"),
         ])
     except TelegramError:
         logger.warning("Не удалось установить меню команд")
@@ -3320,6 +3398,107 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except TelegramError:
             pass
 
+    elif data == "today_refresh":
+        today_d = today_date()
+        today_nav = [
+            [
+                InlineKeyboardButton("🔄 Обновить", callback_data="today_refresh"),
+                InlineKeyboardButton("📈 График", callback_data="chart_overview"),
+                InlineKeyboardButton("🏠 Счета", callback_data="bills_refresh"),
+            ]
+        ]
+        text, markup = build_day_report(user_id, today_d, extra_rows=today_nav)
+        await query.answer("Сводка обновлена ✅")
+        try:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+        except Exception:
+            pass
+        return
+
+    elif data == "piggy_topup_btn":
+        context.user_data["state"] = "wait_piggy"
+        await query.answer()
+        await query.message.reply_text(
+            "💰 *Пополнение плановой копилки*\n\n"
+            "Сколько хочешь отложить? (например: `500 Подработка` или просто `500`):\n"
+            "_Для отмены отправьте /cancel_",
+            parse_mode="Markdown",
+        )
+        return
+
+    elif data == "piggy_withdraw_btn":
+        context.user_data["state"] = "wait_withdraw_piggy"
+        await query.answer()
+        await query.message.reply_text(
+            "💸 *Снятие из копилки*\n\n"
+            "Введите сумму и причину, например: `3000 ремонт телефона`:\n"
+            "_Для отмены отправьте /cancel_",
+            parse_mode="Markdown",
+        )
+        return
+
+    elif data == "menu_excel":
+        await query.answer("Формирую Excel-файл...")
+        try:
+            buf = await asyncio.to_thread(update_excel_file, user_id)
+            await query.message.reply_document(
+                document=buf,
+                filename=f"Бюджет_{today_date().strftime('%m_%Y')}.xlsx",
+                caption="📥 Ваша персональная таблица бюджета с деталями трат",
+            )
+        except Exception:
+            logger.exception("Ошибка при выгрузке Excel:")
+            await query.message.reply_text("⚠️ Не удалось сформировать Excel. Попробуйте позже.")
+        return
+
+    elif data == "menu_categories":
+        text, markup = build_categories_report(user_id, today_date())
+        await query.answer()
+        await safe_edit(query, text, markup)
+        return
+
+    elif data == "menu_months":
+        text, markup = build_months_overview(user_id)
+        await query.answer()
+        try:
+            await query.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+        except TelegramError:
+            await query.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+        return
+
+    elif data == "menu_settings":
+        context.user_data.clear()
+        await query.answer()
+        try:
+            await query.message.edit_text(
+                build_settings_text(user_id),
+                parse_mode="Markdown",
+                reply_markup=settings_inline_kb(user_id),
+            )
+        except TelegramError:
+            await query.message.reply_text(
+                build_settings_text(user_id),
+                parse_mode="Markdown",
+                reply_markup=settings_inline_kb(user_id),
+            )
+        return
+
+    elif data == "menu_undo":
+        await query.answer()
+        last = get_last_expense(user_id)
+        if not last:
+            await query.message.reply_text("ℹ️ Нет трат для отмены.")
+            return
+        delete_expense(user_id, last["id"])
+        day = datetime.date.fromisoformat(last["spent_date"])
+        text, markup = build_day_report(user_id, day)
+        await query.message.reply_text(
+            f"↩️ Отменена трата: *{fmt_money(last['amount'])}* — {esc(last['category'])}\n\n{text}",
+            parse_mode="Markdown",
+            reply_markup=markup or MAIN_KB,
+        )
+        return
+
 
 # --- Текстовые сообщения ---
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3400,6 +3579,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📅 Месяц":
         await show_month(update, context)
         return
+    if text == "🏠 Счета":
+        await show_bills(update, context)
+        return
+    if text == "🏦 Копилка":
+        await show_piggy(update, context)
+        return
     if text == "🏦 В копилку":
         context.user_data["state"] = "wait_piggy"
         await update.message.reply_text(
@@ -3414,6 +3599,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💸 *Снятие из копилки*\n\nВведите сумму и причину, например: `3000 ремонт телефона`:",
             parse_mode="Markdown",
         )
+        return
+    if text in ["⚙️ Меню & Ещё", "⚙️ Меню", "⚙️ Ещё"]:
+        await show_menu_hub(update, context)
+        return
+    if text in ["↩️ Отменить последнюю", "↩️ Отменить"]:
+        await undo_last(update, context)
         return
     if text == "📈 График":
         await send_chart(update, context)
@@ -3430,14 +3621,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🧾 Траты":
         await show_history(update, context)
         return
-    if text == "🏠 Счета":
-        await show_bills(update, context)
-        return
     if text == "⚙️ Настройки":
         await show_settings(update, context)
-        return
-    if text == "↩️ Отменить последнюю":
-        await undo_last(update, context)
         return
 
     state = context.user_data.get("state")
@@ -3734,6 +3919,7 @@ def main():
     app.add_handler(CommandHandler("bills", show_bills))
     app.add_handler(CommandHandler("mandatory", show_bills))
     app.add_handler(CommandHandler("categories", show_categories))
+    app.add_handler(CommandHandler("menu", show_menu_hub))
     app.add_handler(CommandHandler("help", help_cmd))
 
     app.add_handler(CallbackQueryHandler(callback_handler))
