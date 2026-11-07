@@ -212,3 +212,35 @@ def archive_closed_months(user_id: int):
                 (user_id, _month_key(m), mode, raw, save, days, mand_json, 1 if m < launch else 0),
             )
     logger.info("Архив месяцев: пользователь %s, сохранено месяцев: %s", user_id, len(missing))
+
+
+# --- User Category Rules ---
+def get_user_category_rules(user_id: int) -> dict[str, str]:
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT key, value FROM settings WHERE user_id = ? AND key LIKE 'cat_rule_%'",
+            (user_id,),
+        ).fetchall()
+        return {r["key"][9:]: r["value"] for r in rows}
+
+
+def save_user_category_rule(user_id: int, keyword: str, category: str):
+    k = " ".join(str(keyword).casefold().replace("ё", "е").split())
+    if not k or not category:
+        return
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+            (user_id, f"cat_rule_{k}", str(category).strip()),
+        )
+
+
+def delete_user_category_rule(user_id: int, keyword: str):
+    k = " ".join(str(keyword).casefold().replace("ё", "е").split())
+    with db() as conn:
+        conn.execute(
+            "DELETE FROM settings WHERE user_id = ? AND key = ?",
+            (user_id, f"cat_rule_{k}"),
+        )
+

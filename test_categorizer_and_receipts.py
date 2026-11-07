@@ -1,0 +1,312 @@
+import asyncio
+import datetime
+import io
+import os
+import sqlite3
+from PIL import Image, ImageDraw
+
+import pytest
+import zxingcpp
+
+import bot
+from kopilka.database.connection import db
+from kopilka.services.categorizer import (
+    classify_expense,
+    save_user_category_rule,
+    get_user_category_rule,
+    CATEGORIES_CATALOG,
+)
+from kopilka.services.receipt_scanner import (
+    parse_fns_qr,
+    parse_bank_notification,
+    scan_receipt_image,
+)
+
+D = datetime.date
+NOW = datetime.datetime(2026, 11, 7, 12, 0)
+
+
+class FakeMessage:
+    def __init__(self, text=None, photo=(), document=None, caption=""):
+        self.text = text
+        self.photo = photo
+        self.document = document
+        self.caption = caption
+        self.replies = []
+        self.edits = []
+
+    async def reply_text(self, text, parse_mode=None, reply_markup=None):
+        self.replies.append((text, {"parse_mode": parse_mode, "reply_markup": reply_markup}))
+        msg = self
+
+        class SentMsg:
+            def __init__(self, t):
+                self.t = t
+
+            async def edit_text(self, new_text, parse_mode=None, reply_markup=None):
+                msg.edits.append((new_text, {"parse_mode": parse_mode, "reply_markup": reply_markup}))
+
+        return SentMsg(text)
+
+    async def edit_text(self, text, parse_mode=None, reply_markup=None):
+        self.edits.append((text, {"parse_mode": parse_mode, "reply_markup": reply_markup}))
+
+
+class FakePhotoSize:
+    def __init__(self, image_bytes):
+        self._bytes = image_bytes
+
+    async def get_file(self):
+        outer = self
+
+        class F:
+            async def download_to_memory(self, out_buf):
+                out_buf.write(outer._bytes)
+
+        return F()
+
+
+class FakeDocument:
+    def __init__(self, image_bytes, file_name="receipt.jpg", mime_type="image/jpeg"):
+        self._bytes = image_bytes
+        self.file_name = file_name
+        self.mime_type = mime_type
+        self.file_size = len(image_bytes)
+
+    async def get_file(self):
+        outer = self
+
+        class F:
+            async def download_to_memory(self, out_buf):
+                out_buf.write(outer._bytes)
+
+        return F()
+
+
+def make_update(uid=1, text=None, data=None, photo=(), document=None, caption=""):
+    msg = FakeMessage(text=text, photo=photo, document=document, caption=caption)
+    cq = None
+    if data:
+        class CQ:
+            def __init__(self, d):
+                self.data = d
+                self.message = msg
+            async def answer(self): pass
+        cq = CQ(data)
+
+    class Upd:
+        effective_user = type("U", (), {"id": uid})()
+        message = msg
+        callback_query = cq
+
+    return Upd(), msg
+
+
+def make_ctx(user_data=None):
+    class Ctx:
+        def __init__(self):
+            self.user_data = user_data if user_data is not None else {}
+            self.bot_data = {}
+    return Ctx()
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+@pytest.fixture
+def clean_db(tmp_path, monkeypatch):
+    db_file = str(tmp_path / "test.db")
+    monkeypatch.setattr(bot, "DB_PATH", db_file)
+    import kopilka.config as cfg
+    monkeypatch.setattr(cfg, "DB_PATH", db_file)
+
+    bot.init_db()
+    # Настраиваем пользователя
+    bot.set_setting(1, "start_date", "2026-11-01")
+    bot.set_setting(1, "daily_income", "1000")
+    bot.set_setting(1, "income_mode", "daily")
+    return db_file
+
+
+# ---------- 1. Тесты автоматического распределения категорий ----------
+
+def test_classify_expense_catalog():
+    # Продукты
+    cat, kw = classify_expense(1, "молоко")
+    assert cat == "Продукты"
+    assert kw == "молоко"
+
+    # Кафе
+    cat, kw = classify_expense(1, "шаурма")
+    assert cat == "Кафе и рестораны"
+
+    # Магазины
+    cat, _ = classify_expense(1, "пятерочка")
+    assert cat == "Продукты"
+
+    # АЗС
+    cat, _ = classify_expense(1, "лукойл")
+    assert cat == "Авто"
+
+    # Аптека
+    cat, _ = classify_expense(1, "аптека")
+    assert cat == "Здоровье"
+
+    # Неизвестное
+    cat, kw = classify_expense(1, "неизвестныйтовар777")
+    assert cat == "Разное"
+    assert kw is None
+
+
+def test_classify_expense_adapts_to_user_synonym(clean_db):
+    # Если у пользователя уже есть категория «Еда»
+    user_cats = ["Еда", "Такси"]
+    cat, _ = classify_expense(1, "молоко", user_cats)
+    assert cat == "Еда"
+
+    cat, _ = classify_expense(1, "яндекс go", user_cats)
+    assert cat == "Такси"
+
+
+def test_user_category_rule_persists_and_overrides(clean_db):
+    # Добавляем персональное правило пользователя
+    save_user_category_rule(1, "vape", "Вредные привычки")
+    assert get_user_category_rule(1, "vape") == "Вредные привычки"
+
+    cat, kw = classify_expense(1, "vape", [])
+    assert cat == "Вредные привычки"
+    assert kw == "vape"
+
+
+def test_bot_auto_categorizes_expense_and_shows_chip(clean_db, monkeypatch):
+    upd, msg = make_update(text="500 молоко")
+    ctx = make_ctx()
+    run(bot.text_handler(upd, ctx))
+
+    with db() as conn:
+        row = conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchone()
+    assert row["amount"] == 500
+    assert row["category"] == "Продукты"
+
+    # Сообщение содержит пояснение и кнопку оригинального ввода
+    reply_text = msg.replies[0][0]
+    assert "Продукты" in reply_text
+    assert "молоко" in reply_text.lower()
+
+    markup = msg.replies[0][1]["reply_markup"]
+    tokens = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    assert any(c.startswith("xc_") for c in tokens)
+
+
+def test_bot_auto_categorize_can_be_toggled_off(clean_db):
+    # Отключаем автокатегории в настройках
+    bot.set_setting(1, "auto_category", "0")
+
+    upd, msg = make_update(text="500 молоко")
+    ctx = make_ctx()
+    run(bot.text_handler(upd, ctx))
+
+    with db() as conn:
+        row = conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchone()
+    # При отключённой настройке категория остаётся как ввёл пользователь
+    assert row["category"] == "Молоко"
+
+
+# ---------- 2. Тесты чтения чеков и уведомлений ----------
+
+def test_parse_fns_qr():
+    qr_str = "t=20261107T1435&s=1240.50&fn=9960440300999999&i=12345&fp=1234567890&n=1"
+    parsed = parse_fns_qr(qr_str)
+    assert parsed is not None
+    assert parsed["amount"] == 1240.50
+    assert parsed["spent_date"] == D(2026, 11, 7)
+    assert parsed["method"] == "qr"
+
+
+def test_parse_bank_notification():
+    n1 = parse_bank_notification("Покупка 450р Пятерочка")
+    assert n1 is not None
+    assert n1["amount"] == 450.0
+    assert n1["merchant"] == "Пятерочка"
+
+    n2 = parse_bank_notification("СберБанк: Оплата 1250.50 руб Додо Пицца. Баланс 10000р")
+    assert n2 is not None
+    assert n2["amount"] == 1250.50
+    assert "Додо Пицца" in n2["merchant"]
+
+    n3 = parse_bank_notification("Оплата 300 ₽, Яндекс Такси")
+    assert n3 is not None
+    assert n3["amount"] == 300.0
+
+
+def test_bot_handles_bank_notification_message(clean_db):
+    upd, msg = make_update(text="Покупка 450р Пятерочка")
+    ctx = make_ctx()
+    run(bot.text_handler(upd, ctx))
+
+    with db() as conn:
+        row = conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchone()
+    assert row["amount"] == 450.0
+    assert row["category"] == "Продукты"
+    assert "Распознана оплата" in msg.replies[0][0]
+
+
+def test_scan_receipt_qr_image(clean_db):
+    qr_data = "t=20261107T1500&s=890.00&fn=9960440300999999&i=54321&fp=9876543210&n=1"
+    bc = zxingcpp.create_barcode(qr_data, zxingcpp.BarcodeFormat.QRCode)
+    qr_arr = zxingcpp.write_barcode_to_image(bc, scale=4)
+    qr_img = Image.fromarray(qr_arr).convert("RGB")
+
+    buf = io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    img_bytes = buf.getvalue()
+
+    res = scan_receipt_image(img_bytes, user_id=1)
+    assert res["success"] is True
+    assert res["amount"] == 890.00
+    assert res["spent_date"] == D(2026, 11, 7)
+    assert res["method"] == "qr"
+
+
+def test_bot_photo_handler_records_receipt(clean_db):
+    qr_data = "t=20261107T1600&s=1500.00&fn=9960440300999999&i=11111&fp=2222222222&n=1"
+    bc = zxingcpp.create_barcode(qr_data, zxingcpp.BarcodeFormat.QRCode)
+    qr_arr = zxingcpp.write_barcode_to_image(bc, scale=4)
+    qr_img = Image.fromarray(qr_arr).convert("RGB")
+
+    buf = io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    img_bytes = buf.getvalue()
+
+    fake_photo = FakePhotoSize(img_bytes)
+    upd, msg = make_update(photo=[fake_photo])
+    ctx = make_ctx()
+    run(bot.photo_handler(upd, ctx))
+
+    with db() as conn:
+        row = conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchone()
+    assert row["amount"] == 1500.0
+    assert "Чек успешно распознан" in msg.edits[0][0]
+    assert "1 500" in msg.edits[0][0]
+
+
+def test_bot_document_handler_records_receipt_file(clean_db):
+    qr_data = "t=20261107T1700&s=620.00&fn=9960440300999999&i=33333&fp=4444444444&n=1"
+    bc = zxingcpp.create_barcode(qr_data, zxingcpp.BarcodeFormat.QRCode)
+    qr_arr = zxingcpp.write_barcode_to_image(bc, scale=4)
+    qr_img = Image.fromarray(qr_arr).convert("RGB")
+
+    buf = io.BytesIO()
+    qr_img.save(buf, format="PNG")
+    img_bytes = buf.getvalue()
+
+    fake_doc = FakeDocument(img_bytes, file_name="receipt.png", mime_type="image/png")
+    upd, msg = make_update(document=fake_doc)
+    ctx = make_ctx()
+    run(bot.document_handler(upd, ctx))
+
+    with db() as conn:
+        row = conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchone()
+    assert row["amount"] == 620.0
+    assert "Чек успешно распознан" in msg.edits[0][0]

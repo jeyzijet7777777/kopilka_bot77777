@@ -2,3 +2,6 @@ python-telegram-bot[job-queue]>=21.0,<23
 matplotlib>=3.7,<4
 openpyxl>=3.1,<4
 tzdata
+pillow>=10.0,<14
+zxing-cpp>=3.0,<4
+rapidocr-onnxruntime>=1.2,<2

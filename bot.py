@@ -63,6 +63,15 @@ from kopilka.database.repository import (
     get_mandatory_payments_for_month,
     delete_mandatory_payment,
 )
+from kopilka.services.categorizer import (
+    classify_expense,
+    save_user_category_rule,
+    CATEGORIES_CATALOG,
+)
+from kopilka.services.receipt_scanner import (
+    scan_receipt_image,
+    parse_bank_notification,
+)
 
 
 # --- Загрузка настроек из .env ---
@@ -630,9 +639,14 @@ def cat_key(name: str) -> str:
     return " ".join(str(name).casefold().replace("ё", "е").split())
 
 
+_DYNAMIC_CATEGORY_TOKENS: dict[str, str] = {}
+
+
 def cat_token(name: str) -> str:
     """Короткий отпечаток категории для callback_data (лимит Telegram 64 байта, а названия длинные и русские)."""
-    return format(zlib.crc32(cat_key(name).encode("utf-8")) & 0xFFFFFFFF, "08x")
+    tok = format(zlib.crc32(cat_key(name).encode("utf-8")) & 0xFFFFFFFF, "08x")
+    _DYNAMIC_CATEGORY_TOKENS[tok] = str(name).strip()
+    return tok
 
 
 def used_categories(user_id: int, limit: int = None, exclude=()) -> list:
@@ -691,6 +705,11 @@ def find_category_by_token(user_id: int, token: str):
     for c in used_categories(user_id):
         if cat_token(c) == token:
             return c
+    for c in CATEGORIES_CATALOG:
+        if cat_token(c) == token:
+            return c
+    if token in _DYNAMIC_CATEGORY_TOKENS:
+        return _DYNAMIC_CATEGORY_TOKENS[token]
     return None
 
 
@@ -703,13 +722,15 @@ def category_chips(user_id: int, exp_id: int, names, per_row: int = 2) -> list:
     return [btns[i:i + per_row] for i in range(0, len(btns), per_row)]
 
 
-def suggestion_rows(user_id: int, exp_id: int, category: str, was_default: bool, similar=None) -> list:
+def suggestion_rows(user_id: int, exp_id: int, category: str, was_default: bool, similar=None, candidates=None) -> list:
     """Подсказки под только что записанной тратой: без категории — частые из использованных;
     новая категория, похожая на существующую (similar, найдена ДО записи), — «возможно, это …»."""
     if was_default:
         return category_chips(user_id, exp_id, used_categories(user_id, limit=6, exclude=[category]))
     if similar:
         return category_chips(user_id, exp_id, [similar], per_row=1)
+    if candidates:
+        return category_chips(user_id, exp_id, candidates, per_row=2)
     return []
 
 
@@ -995,12 +1016,14 @@ def settings_inline_kb(user_id: int):
     month_report_on = get_setting(user_id, "month_report", "1") != "0"
     warn_on = get_setting(user_id, "warn_limit", "1") != "0"
     week_on = get_setting(user_id, "week_summary", "1") != "0"
+    auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
     mode_label = INCOME_MODE_SHORT.get(info["income_mode"], info["income_mode"])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🏦 Доход: {fmt_money(info['raw_income'])} ({mode_label})", callback_data="set_daily_income")],
         [InlineKeyboardButton("🔄 Изменить график получения дохода", callback_data="set_income_mode")],
         [InlineKeyboardButton(f"📅 Дней в месяце: {days_label}", callback_data="set_days_count")],
         [InlineKeyboardButton(f"⏰ Время отчёта, {TZ_LABEL} (сейчас {reminder_time})", callback_data="set_reminder_time")],
+        [InlineKeyboardButton(f"🪄 Умные категории трат: {'вкл' if auto_cat_on else 'выкл'}", callback_data="toggle_auto_category")],
         [InlineKeyboardButton(f"📈 График в вечернем отчёте: {'вкл' if chart_on else 'выкл'}", callback_data="toggle_report_chart")],
         [InlineKeyboardButton(f"📅 Отчёт за месяц 1-го числа: {'вкл' if month_report_on else 'выкл'}", callback_data="toggle_month_report")],
         [InlineKeyboardButton(f"📆 Сводка за неделю по понедельникам: {'вкл' if week_on else 'выкл'}", callback_data="toggle_week_summary")],
@@ -2638,49 +2661,153 @@ async def restore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update) or context.user_data.get("state") != "wait_restore_file":
-        return
+async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption: str = ""):
+    ensure_start_day(user_id)
+    status_msg = await msg.reply_text("🔍 Читаю чек, секунду...")
+    try:
+        result = scan_receipt_image(
+            image_bytes,
+            user_id=user_id,
+            caption=caption or "",
+            user_existing_categories=used_categories(user_id),
+        )
+
+        if not result or not result.get("success") or not result.get("amount"):
+            await status_msg.edit_text(
+                "🤔 Не удалось распознать сумму или QR-код на чеке.\n\n"
+                "💡 Попробуйте:\n"
+                "• Сфотографировать чек при хорошем освещении\n"
+                "• Чтобы QR-код или строка «ИТОГО» были чётко видны\n"
+                "• Либо запишите трату текстом, например: `450 продукты`.",
+                parse_mode="Markdown",
+            )
+            return
+
+        amount = result["amount"]
+        spent_d = result.get("spent_date") or today_date()
+        if spent_d > today_date():
+            spent_d = today_date()
+
+        merchant = result.get("merchant")
+        category = result.get("category") or DEFAULT_CATEGORY
+        category = canonical_category(user_id, category)
+        method = result.get("method", "чек")
+
+        before = day_spent(user_id, spent_d)
+        with db() as conn:
+            exp_id = conn.execute(
+                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                (user_id, spent_d.isoformat(), amount, category),
+            ).lastrowid
+
+        warning = limit_warning(user_id, spent_d, before, before + amount)
+        top_cats = used_categories(user_id, limit=6, exclude=[category])
+        chips = category_chips(user_id, exp_id, top_cats) if top_cats else []
+        chips.append([
+            InlineKeyboardButton("✏️ Сменить категорию", callback_data=f"xe_cat_{exp_id}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"xe_del_{exp_id}"),
+        ])
+        report_text, markup = build_day_report(user_id, spent_d, extra_rows=chips)
+
+        merch_line = f"\n🏪 Магазин: *{esc(merchant)}*" if merchant else ""
+        items_line = ""
+        if result.get("items"):
+            preview = ", ".join(result["items"][:3])
+            if len(result["items"]) > 3:
+                preview += "..."
+            items_line = f"\n🛒 Товары: _{esc(preview)}_"
+
+        method_name = "QR-код" if method == "qr" else "текст чека"
+        header = (
+            f"🧾 *Чек успешно распознан ({method_name})!*\n\n"
+            f"💰 Сумма: *{fmt_money(amount)}*\n"
+            f"🏷 Категория: *{esc(category)}*\n"
+            f"📅 Дата: *{spent_d.strftime('%d.%m.%Y')}*"
+            f"{merch_line}"
+            f"{items_line}\n\n"
+        )
+        await status_msg.edit_text(
+            f"{header}{warning}{report_text}",
+            parse_mode="Markdown",
+            reply_markup=markup or MAIN_KB,
+        )
+    except Exception as e:
+        logger.exception("Ошибка при обработке фото чека: %s", e)
+        await status_msg.edit_text(
+            "⚠️ Произошла ошибка при чтении чека. Попробуйте отправить фото ещё раз или введите трату текстом.",
+        )
+
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    if not msg or not msg.photo:
+        return
+    user_id = update.effective_user.id
+    photo_file = await msg.photo[-1].get_file()
+    buf = io.BytesIO()
+    await photo_file.download_to_memory(buf)
+    await _process_receipt_bytes(msg, user_id, buf.getvalue(), msg.caption or "")
+
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.document:
+        return
     doc = msg.document
     admin_id = update.effective_user.id
-    if doc.file_size and doc.file_size > TG_DOWNLOAD_LIMIT:
-        await msg.reply_text("❌ Файл больше 20 МБ: Telegram не даёт боту его скачать. "
-                             "Положите базу на том вручную средствами хостинга.")
+
+    if is_admin(update) and context.user_data.get("state") == "wait_restore_file":
+        if doc.file_size and doc.file_size > TG_DOWNLOAD_LIMIT:
+            await msg.reply_text("❌ Файл больше 20 МБ: Telegram не даёт боту его скачать. "
+                                 "Положите базу на том вручную средствами хостинга.")
+            return
+
+        tmpdir = tempfile.mkdtemp(prefix="upload_")
+        try:
+            upload = os.path.join(tmpdir, "upload.bin")
+            tg_file = await doc.get_file()
+            await tg_file.download_to_drive(upload)
+            candidate, info = await asyncio.to_thread(datasafe.prepare_restore, upload, today_date())
+        except datasafe.RestoreError as e:
+            await msg.reply_text(f"❌ Файл не подходит: {e}\n\nПришлите другой файл или нажмите /cancel. База не тронута.")
+            return
+        except Exception:
+            logger.exception("Ошибка при проверке файла для восстановления")
+            await msg.reply_text("❌ Не удалось проверить файл (подробности в логах). База не тронута.")
+            return
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        _discard_pending_restore(admin_id)
+        token = uuid.uuid4().hex[:10]
+        _RUNTIME.setdefault("restore_pending", {})[admin_id] = {"token": token, "path": candidate}
+        current = datasafe.db_stats(os.path.abspath(DB_PATH))
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Заменить базу", callback_data=f"restore_ok_{token}"),
+            InlineKeyboardButton("Отмена", callback_data=f"restore_no_{token}"),
+        ]])
+        await msg.reply_text(
+            "✅ Файл прошёл проверку (целостность, таблицы, версия схемы).\n\n"
+            f"В файле: {datasafe.stats_line(info)}\n"
+            f"Сейчас в боте: {datasafe.stats_line(current)}\n\n"
+            "При замене ВСЕ текущие данные будут заменены данными из файла. Копия текущей базы "
+            "сохранится на томе и придёт вам файлом. Заменить?",
+            reply_markup=markup,
+        )
         return
 
-    tmpdir = tempfile.mkdtemp(prefix="upload_")
-    try:
-        upload = os.path.join(tmpdir, "upload.bin")
+    # Проверка: отправлен ли документ с изображением чека
+    mime = (getattr(doc, "mime_type", None) or "").lower()
+    fn = (getattr(doc, "file_name", None) or getattr(doc, "src", None) or "").lower()
+    if mime.startswith("image/") or fn.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+        user_id = update.effective_user.id
+        if doc.file_size and doc.file_size > TG_DOWNLOAD_LIMIT:
+            await msg.reply_text("⚠️ Файл слишком большой (больше 20 МБ).")
+            return
         tg_file = await doc.get_file()
-        await tg_file.download_to_drive(upload)
-        candidate, info = await asyncio.to_thread(datasafe.prepare_restore, upload, today_date())
-    except datasafe.RestoreError as e:
-        await msg.reply_text(f"❌ Файл не подходит: {e}\n\nПришлите другой файл или нажмите /cancel. База не тронута.")
-        return
-    except Exception:
-        logger.exception("Ошибка при проверке файла для восстановления")
-        await msg.reply_text("❌ Не удалось проверить файл (подробности в логах). База не тронута.")
-        return
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    _discard_pending_restore(admin_id)
-    token = uuid.uuid4().hex[:10]
-    _RUNTIME.setdefault("restore_pending", {})[admin_id] = {"token": token, "path": candidate}
-    current = datasafe.db_stats(os.path.abspath(DB_PATH))
-    markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Заменить базу", callback_data=f"restore_ok_{token}"),
-        InlineKeyboardButton("Отмена", callback_data=f"restore_no_{token}"),
-    ]])
-    await msg.reply_text(
-        "✅ Файл прошёл проверку (целостность, таблицы, версия схемы).\n\n"
-        f"В файле: {datasafe.stats_line(info)}\n"
-        f"Сейчас в боте: {datasafe.stats_line(current)}\n\n"
-        "При замене ВСЕ текущие данные будут заменены данными из файла. Копия текущей базы "
-        "сохранится на томе и придёт вам файлом. Заменить?",
-        reply_markup=markup,
-    )
+        buf = io.BytesIO()
+        await tg_file.download_to_memory(buf)
+        await _process_receipt_bytes(msg, user_id, buf.getvalue(), msg.caption or "")
 
 
 async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str):
@@ -2960,6 +3087,9 @@ async def expense_edit_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text("ℹ️ Такой категории уже нет. Напишите название вручную.")
             return
         update_expense(user_id, exp_id, category=name)
+        last_kw = context.user_data.get("last_auto_keyword")
+        if last_kw:
+            save_user_category_rule(user_id, last_kw, name)
         context.user_data.clear()
         text, markup = build_expense_card(user_id, exp_id, "✅ Категория изменена.\n\n")
         await safe_edit(query, text, markup)
@@ -3006,6 +3136,9 @@ async def handle_expense_edit_input(update: Update, context: ContextTypes.DEFAUL
             await update.message.reply_text("⚠️ Напишите название категории, например: `Продукты`", parse_mode="Markdown")
             return
         update_expense(user_id, exp_id, category=name)
+        last_kw = context.user_data.get("last_auto_keyword")
+        if last_kw:
+            save_user_category_rule(user_id, last_kw, name)
         note = f"✅ Категория изменена: {esc(row['category'])} → *{esc(name)}*.\n\n"
 
     context.user_data.clear()
@@ -3195,6 +3328,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "toggle_warn_limit":
         cur = get_setting(user_id, "warn_limit", "1")
         set_setting(user_id, "warn_limit", "1" if cur == "0" else "0")
+        await refresh_settings(query, user_id)
+
+    elif data == "toggle_auto_category":
+        cur = get_setting(user_id, "auto_category", "1")
+        set_setting(user_id, "auto_category", "0" if cur != "0" else "1")
         await refresh_settings(query, user_id)
 
     elif data == "set_days_count":
@@ -3814,6 +3952,40 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+    # Распознавание банковских уведомлений, чеков и СМС («Покупка 450р Пятерочка»)
+    bank_parsed = parse_bank_notification(text)
+    if bank_parsed and bank_parsed.get("amount"):
+        amount = bank_parsed["amount"]
+        spent_d = bank_parsed.get("spent_date") or today_date()
+        if spent_d > today_date():
+            spent_d = today_date()
+        merchant = bank_parsed.get("merchant") or ""
+        ensure_start_day(user_id)
+        classified_cat, _ = classify_expense(user_id, merchant, used_categories(user_id))
+        category = canonical_category(user_id, classified_cat if classified_cat != "Разное" else (cap(merchant) or DEFAULT_CATEGORY))
+        before = day_spent(user_id, spent_d)
+        with db() as conn:
+            exp_id = conn.execute(
+                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                (user_id, spent_d.isoformat(), amount, category),
+            ).lastrowid
+        warning = limit_warning(user_id, spent_d, before, before + amount)
+        top_cats = used_categories(user_id, limit=6, exclude=[category])
+        chips = category_chips(user_id, exp_id, top_cats) if top_cats else []
+        chips.append([
+            InlineKeyboardButton("✏️ Сменить категорию", callback_data=f"xe_cat_{exp_id}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"xe_del_{exp_id}"),
+        ])
+        report_text, markup = build_day_report(user_id, spent_d, extra_rows=chips)
+        merch_str = f" ({esc(merchant)})" if merchant else ""
+        await update.message.reply_text(
+            f"🧾 Распознана оплата: *{fmt_money(amount)}* — {esc(category)}{merch_str}\n\n"
+            f"{warning}{report_text}",
+            parse_mode="Markdown",
+            reply_markup=markup or MAIN_KB,
+        )
+        return
+
     parsed = parse_expense_message(text)
     if not parsed:
         await update.message.reply_text(
@@ -3834,6 +4006,22 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_start_day(user_id)
     was_default = category == DEFAULT_CATEGORY
     similar = None if was_default else similar_category(user_id, category)  # до записи, иначе найдёт саму себя
+
+    auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
+    note_hint = ""
+    candidate_chips = None
+
+    if auto_cat_on and not was_default and not similar:
+        known_keys = {cat_key(c) for c in used_categories(user_id)}
+        if cat_key(category) not in known_keys:
+            classified_cat, matched_kw = classify_expense(user_id, category, used_categories(user_id))
+            if classified_cat and classified_cat != "Разное":
+                raw_input = category
+                category = classified_cat
+                note_hint = f"\n💡 _Категория подобрана по слову «{esc(raw_input)}»_"
+                candidate_chips = [raw_input]
+                context.user_data["last_auto_keyword"] = raw_input
+
     category = canonical_category(user_id, category)  # «ПРОДУКТЫ» -> уже существующее «Продукты»
     before = day_spent(user_id, spent_d)
     with db() as conn:
@@ -3843,10 +4031,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).lastrowid
 
     warning = limit_warning(user_id, spent_d, before, before + amount)
-    extra = suggestion_rows(user_id, exp_id, category, was_default, similar)
+    extra = suggestion_rows(user_id, exp_id, category, was_default, similar, candidates=candidate_chips)
     report_text, markup = build_day_report(user_id, spent_d, extra_rows=extra)
     await update.message.reply_text(
-        f"✅ Записано: *{fmt_money(amount)}* — {esc(category)} ({spent_d.strftime('%d.%m')})\n\n"
+        f"✅ Записано: *{fmt_money(amount)}* — {esc(category)} ({spent_d.strftime('%d.%m')}){note_hint}\n\n"
         f"{warning}{report_text}",
         parse_mode="Markdown",
         reply_markup=markup or MAIN_KB,
@@ -3923,6 +4111,7 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
 
     app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_error_handler(error_handler)
