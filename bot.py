@@ -30,9 +30,12 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
     InputMediaPhoto,
+    InputTextMessageContent,
     ReplyKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.error import Forbidden, TelegramError
 from telegram.ext import (
@@ -40,6 +43,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     PicklePersistence,
     filters,
@@ -72,6 +76,19 @@ from kopilka.services.categorizer import (
 from kopilka.services.receipt_scanner import (
     scan_receipt_image,
     parse_bank_notification,
+)
+from kopilka.services.goals_service import (
+    get_piggy_goal,
+    set_piggy_goal,
+    clear_piggy_goal,
+    format_goal_progress,
+)
+from kopilka.services.widget_api import (
+    configure_api,
+    get_or_create_widget_token,
+    rotate_widget_token,
+    start_widget_server,
+    stop_widget_server,
 )
 
 
@@ -929,33 +946,7 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.By
 
 
 # --- Клавиатуры ---
-MAIN_KB = ReplyKeyboardMarkup(
-    [
-        ["📊 Сегодня", "📅 Месяц"],
-        ["🏠 Счета", "🏦 Копилка"],
-        ["🧾 Траты", "🏷 Категории"],
-        ["⚙️ Меню & Ещё", "↩️ Отменить"],
-    ],
-    resize_keyboard=True,
-)
-MENU_TEXTS = {
-    b for row in MAIN_KB.keyboard for b in (x.text if hasattr(x, "text") else x for x in row)
-} | {
-    "🏦 В копилку",
-    "💸 Из копилки",
-    "📈 График",
-    "📥 Скачать Excel",
-    "⚙️ Настройки",
-    "↩️ Отменить последнюю",
-    "📚 Месяцы",
-    "🏷 Категории",
-    "🧾 Траты",
-    "🏠 Счета",
-    "⚙️ Меню & Ещё",
-    "⚙️ Меню",
-    "⚙️ Ещё",
-    "↩️ Отменить",
-}
+from kopilka.keyboards.reply import MAIN_KB, MENU_TEXTS
 
 
 def mode_markup(prefix: str):
@@ -985,7 +976,6 @@ def chart_kb(user_id: int = None, kind: str = "overview", month: datetime.date =
             InlineKeyboardButton("🔮 Прогноз" if not month else "🔮 Итог", callback_data=f"chart_forecast{sfx}"),
             InlineKeyboardButton("🍩 Структура", callback_data=f"chart_structure{sfx}"),
         ],
-        [InlineKeyboardButton("💧 Итог месяца", callback_data=f"chart_waterfall{sfx}")],
     ]
     if user_id is not None:
         months = _list_months(user_id, limit=1200)  # от нового к старому
@@ -1023,12 +1013,15 @@ def settings_inline_kb(user_id: int):
     week_on = get_setting(user_id, "week_summary", "1") != "0"
     auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
     ask_cat_on = get_setting(user_id, "ask_cat_on_num", "0") != "0"
+    compact_on = get_setting(user_id, "compact_mode", "0") == "1"
     mode_label = INCOME_MODE_SHORT.get(info["income_mode"], info["income_mode"])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🏦 Доход: {fmt_money(info['raw_income'])} ({mode_label})", callback_data="set_daily_income")],
         [InlineKeyboardButton("🔄 Изменить график получения дохода", callback_data="set_income_mode")],
         [InlineKeyboardButton(f"📅 Дней в месяце: {days_label}", callback_data="set_days_count")],
         [InlineKeyboardButton(f"⏰ Время отчёта, {TZ_LABEL} (сейчас {reminder_time})", callback_data="set_reminder_time")],
+        [InlineKeyboardButton(f"💬 Компактные ответы: {'вкл' if compact_on else 'выкл'}", callback_data="toggle_compact_mode")],
+        [InlineKeyboardButton("📱 Виджеты (iOS / Android) & Web App", callback_data="open_widgets_hub")],
         [InlineKeyboardButton(f"🪄 Авто-категории трат: {'вкл' if auto_cat_on else 'выкл'}", callback_data="toggle_auto_category")],
         [InlineKeyboardButton(f"❓ Спрашивать категорию для чисел: {'вкл' if ask_cat_on else 'выкл'}", callback_data="toggle_ask_category")],
         [InlineKeyboardButton("🪄 Исправить старые категории трат", callback_data="run_fix_categories")],
@@ -1663,10 +1656,19 @@ async def daily_reminder_job(context: ContextTypes.DEFAULT_TYPE):
         sent = False
         try:
             text, markup = build_day_report(uid, t_date)
+            days_in_cur_month = calendar.monthrange(t_date.year, t_date.month)[1]
+            bill_remind = ""
+            if t_date.day >= days_in_cur_month - 2:
+                b_status = get_month_mandatory_status(uid, t_date)
+                if b_status and b_status.get("total_remaining", 0) > 0:
+                    bill_remind = (
+                        f"\n\n⚠️ *Напоминание о счетах:* осталось оплатить обязательных платежей на "
+                        f"*{fmt_money(b_status['total_remaining'])}* (раздел «🏠 Счета»)."
+                    )
             header = "⏰ *Ваш автоматический вечерний отчёт за день!*\n\n"
             await context.bot.send_message(
                 chat_id=uid,
-                text=header + text,
+                text=header + text + bill_remind,
                 parse_mode="Markdown",
                 reply_markup=markup or MAIN_KB,
             )
@@ -1938,29 +1940,90 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def menu_hub_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("🏦 Копилка", callback_data="menu_piggy"),
+            InlineKeyboardButton("🧾 Траты", callback_data="menu_history"),
+        ],
+        [
             InlineKeyboardButton("📈 Графика трат", callback_data="chart_overview"),
+            InlineKeyboardButton("🏷 Траты по категориям", callback_data="menu_categories"),
+        ],
+        [
+            InlineKeyboardButton("📱 Виджеты & Web App", callback_data="open_widgets_hub"),
             InlineKeyboardButton("📥 Скачать Excel", callback_data="menu_excel"),
         ],
         [
-            InlineKeyboardButton("🏷 Траты по категориям", callback_data="menu_categories"),
             InlineKeyboardButton("📚 Архив месяцев", callback_data="menu_months"),
+            InlineKeyboardButton("⚙️ Настройки бюджета", callback_data="menu_settings"),
         ],
         [
-            InlineKeyboardButton("⚙️ Настройки бюджета", callback_data="menu_settings"),
             InlineKeyboardButton("↩️ Отменить последнюю", callback_data="menu_undo"),
         ],
     ])
+
+
+async def show_widgets_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    token = get_or_create_widget_token(user_id)
+
+    port = int(os.environ.get("WIDGET_API_PORT", os.environ.get("PORT", "8080")))
+    base_url = os.environ.get("WIDGET_API_BASE_URL", f"http://localhost:{port}").rstrip("/")
+    summary_url = f"{base_url}/api/v1/{token}/summary"
+    scriptable_url = f"{base_url}/api/v1/{token}/scriptable"
+    shortcuts_url = f"{base_url}/api/v1/{token}/shortcuts"
+    kwgt_url = f"{base_url}/api/v1/{token}/kwgt"
+    webapp_url = f"{base_url}/webapp/{token}"
+
+    text = (
+        "📱 *Виджеты на экран и Telegram Web App*\n\n"
+        "Смотрите дневной остаток и записывайте расходы прямо с рабочего стола телефона без открытия Telegram!\n\n"
+        "🍏 *Для iPhone / iPad (iOS):*\n"
+        "• *Scriptable* — нативный виджет с кругом остатка, банком сдачи и копилкой на экран «Домой» и экран блокировки.\n"
+        "• *Apple Shortcuts (Команды Siri)* — мгновенная запись расхода в 1 клик с экрана «Домой» или кнопки Action.\n\n"
+        "🤖 *Для Android:*\n"
+        "• *KWGT* — виджет с прогрессом и остатком дня.\n"
+        "• *MacroDroid / Tasker* — авто-запись расходов из банковских пушей (Сбер, Т-Банк, ВТБ) без вашего участия!\n"
+        "• *Ярлык чата* — вынесите бота на главный экран (меню ⋮ → «Добавить на главный экран»).\n\n"
+        "🌐 *Telegram Mini App:* интерактивный дашборд прямо внутри Telegram!\n\n"
+        f"🔑 _Ваш секретный токен доступа:_ `{token}`"
+    )
+
+    rows = []
+    if not base_url.startswith("http://localhost") and not base_url.startswith("http://127.0.0.1"):
+        rows.append([InlineKeyboardButton("📱 Открыть Web App", web_app=WebAppInfo(url=webapp_url))])
+    else:
+        rows.append([InlineKeyboardButton("🌐 Открыть Web App в браузере", url=webapp_url)])
+
+    rows.extend([
+        [
+            InlineKeyboardButton("🍏 Скрипт Scriptable (iOS)", url=scriptable_url),
+            InlineKeyboardButton("⚡️ Команды Siri (iOS)", url=shortcuts_url),
+        ],
+        [
+            InlineKeyboardButton("🤖 Виджет Android (KWGT)", url=kwgt_url),
+            InlineKeyboardButton("🔄 Сменить токен", callback_data="rotate_widget_token"),
+        ],
+    ])
+    markup = InlineKeyboardMarkup(rows)
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
 
 async def show_menu_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⚙️ *Меню и дополнительные сервисы*\n\n"
         "Выберите нужный раздел или отчёт:\n"
-        "• 📈 *Графика* — визуальные диаграммы расходов и остатка\n"
-        "• 📥 *Excel* — полная выгрузка персональной таблицы\n"
+        "• 🏦 *Копилка* — баланс, история пополнений и финансовые цели\n"
+        "• 🧾 *Траты* — список последних трат с возможностью правки\n"
+        "• 📈 *Графика* — визуальные диаграммы расходов и календаря\n"
         "• 🏷 *Категории* — подробная разбивка расходов по статьям\n"
+        "• 📱 *Виджеты & Web App* — для iOS (Scriptable, Команды) и Android (KWGT)\n"
+        "• 📥 *Excel* — полная выгрузка персональной таблицы\n"
         "• 📚 *Архив* — сравнение и история прошлых месяцев\n"
-        "• ⚙️ *Настройки* — доходы, плановая копилка и время отчётов\n"
+        "• ⚙️ *Настройки* — доходы, параметры лимита и компактный режим\n"
         "• ↩️ *Отмена* — быстрый откат последней добавленной траты\n\n"
         "💡 _Подсказка: чтобы записать трату, просто отправьте, например: `450 продукты`._"
     )
@@ -2708,7 +2771,13 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
     ensure_start_day(user_id)
     status_msg = await msg.reply_text("🔍 Читаю чек, секунду...")
     try:
-        result = scan_receipt_image(
+        if hasattr(msg, "reply_chat_action"):
+            try:
+                await msg.reply_chat_action(action="typing")
+            except Exception:
+                pass
+        result = await asyncio.to_thread(
+            scan_receipt_image,
             image_bytes,
             user_id=user_id,
             caption=caption or "",
@@ -2761,19 +2830,34 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
             items_line = f"\n🛒 Товары: _{esc(preview)}_"
 
         method_name = "QR-код" if method == "qr" else "текст чека"
-        header = (
-            f"🧾 *Чек успешно распознан ({method_name})!*\n\n"
-            f"💰 Сумма: *{fmt_money(amount)}*\n"
-            f"🏷 Категория: *{esc(category)}*\n"
-            f"📅 Дата: *{spent_d.strftime('%d.%m.%Y')}*"
-            f"{merch_line}"
-            f"{items_line}\n\n"
-        )
-        await status_msg.edit_text(
-            f"{header}{warning}{report_text}",
-            parse_mode="Markdown",
-            reply_markup=markup or MAIN_KB,
-        )
+        compact_on = get_setting(user_id, "compact_mode", "0") == "1"
+        if compact_on:
+            rem = max(0.0, get_budget_info(user_id, spent_d)["daily_limit"] - (before + amount))
+            compact_text = (
+                f"🧾 Чек ({method_name}): *{fmt_money(amount)}* — {esc(category)}{merch_line}\n"
+                f"📊 Остаток на сегодня: *{fmt_money(rem)}*\n{warning}"
+            )
+            compact_kb_rows = list(chips) if chips else []
+            compact_kb_rows.append([InlineKeyboardButton("📊 Полный отчёт дня", callback_data=f"show_full_day_{spent_d.isoformat()}")])
+            await status_msg.edit_text(
+                compact_text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(compact_kb_rows),
+            )
+        else:
+            header = (
+                f"🧾 *Чек успешно распознан ({method_name})!*\n\n"
+                f"💰 Сумма: *{fmt_money(amount)}*\n"
+                f"🏷 Категория: *{esc(category)}*\n"
+                f"📅 Дата: *{spent_d.strftime('%d.%m.%Y')}*"
+                f"{merch_line}"
+                f"{items_line}\n\n"
+            )
+            await status_msg.edit_text(
+                f"{header}{warning}{report_text}",
+                parse_mode="Markdown",
+                reply_markup=markup or MAIN_KB,
+            )
     except Exception as e:
         logger.exception("Ошибка при обработке фото чека: %s", e)
         await status_msg.edit_text(
@@ -2944,16 +3028,30 @@ def build_piggy_history(user_id: int):
             "WHERE user_id = ? ORDER BY id DESC LIMIT 10",
             (user_id,),
         ).fetchall()
+
+    goal = get_piggy_goal(user_id)
+    goal_block = ("\n" + format_goal_progress(info["piggy_total"], goal) + "\n") if goal else ""
+
     lines = [
         f"🏦 *Копилка (всего):* {fmt_money(info['piggy_total'])}",
         f"_Плановые отчисления: {fmt_money(info['save'])} в месяц_",
-        "",
     ]
+    if goal_block:
+        lines.append(goal_block)
+    else:
+        lines.append("")
+
     action_row = [
         InlineKeyboardButton("➕ Пополнить", callback_data="piggy_topup_btn"),
         InlineKeyboardButton("💸 Снять", callback_data="piggy_withdraw_btn"),
     ]
-    buttons = [action_row]
+    goal_row = [
+        InlineKeyboardButton("🎯 Изменить цель" if goal else "🎯 Поставить цель", callback_data="piggy_set_goal"),
+    ]
+    if goal:
+        goal_row.append(InlineKeyboardButton("❌ Сбросить цель", callback_data="piggy_clear_goal"))
+
+    buttons = [action_row, goal_row]
     if rows:
         lines.append("*Последние операции* (нажмите, чтобы отменить):")
         for r in rows:
@@ -3007,6 +3105,50 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.inline_query.query.strip()
+    user_id = update.effective_user.id
+    results = []
+
+    today = today_date()
+    info = get_budget_info(user_id, today)
+    spent = day_spent(user_id, today)
+    rem = max(0.0, info["daily_limit"] - spent)
+    pool = calc_change_pool(user_id, today)
+    piggy = info["piggy_total"]
+
+    summary_text = (
+        f"📊 *Мой бюджет на {today.strftime('%d.%m')}:*\n"
+        f"• Остаток на сегодня: *{fmt_money(rem)}* (из {fmt_money(info['daily_limit'])})\n"
+        f"• Банк сдачи: *{fmt_money(pool)}*\n"
+        f"• Накоплено в копилке: *{fmt_money(piggy)}*"
+    )
+    results.append(
+        InlineQueryResultArticle(
+            id="status",
+            title=f"📊 Остаток на сегодня: {fmt_money(rem)}",
+            description=f"Лимит: {fmt_money(info['daily_limit'])} | Сдача: {fmt_money(pool)} | Копилка: {fmt_money(piggy)}",
+            input_message_content=InputTextMessageContent(summary_text, parse_mode="Markdown"),
+        )
+    )
+
+    if query:
+        parsed = parse_expense_message(query)
+        if parsed:
+            amt, cat, _ = parsed
+            exp_text = f"{int(amt) if amt.is_integer() else amt} {cat}"
+            results.append(
+                InlineQueryResultArticle(
+                    id="add_exp",
+                    title=f"💸 Записать: {fmt_money(amt)} — {cat}",
+                    description=f"Отправить трату боту: {exp_text}",
+                    input_message_content=InputTextMessageContent(exp_text),
+                )
+            )
+
+    await update.inline_query.answer(results, cache_time=5, is_personal=True)
+
+
 async def post_init(app):
     try:
         await app.bot.set_my_commands([
@@ -3016,6 +3158,7 @@ async def post_init(app):
             BotCommand("piggy", "🏦 Копилка и операции"),
             BotCommand("history", "🧾 Последние траты: правка/удаление"),
             BotCommand("categories", "🏷 Расходы по категориям"),
+            BotCommand("widget", "📱 Виджеты (iOS / Android) & Web App"),
             BotCommand("menu", "⚙️ Меню и сервисы"),
             BotCommand("chart", "📈 Графика и диаграммы"),
             BotCommand("excel", "📥 Скачать Excel-отчет"),
@@ -3027,10 +3170,40 @@ async def post_init(app):
         ])
     except TelegramError:
         logger.warning("Не удалось установить меню команд")
+
+    try:
+        me = await app.bot.get_me()
+        bot_user = me.username or "kopilka_bot"
+    except Exception:
+        bot_user = "kopilka_bot"
+
+    configure_api(
+        budget_info_fn=get_budget_info,
+        change_pool_fn=calc_change_pool,
+        day_spent_fn=day_spent,
+        canonical_cat_fn=canonical_category,
+        classify_cat_fn=classify_expense,
+        used_cats_fn=used_categories,
+        bot_username=bot_user,
+    )
+    api_host = os.environ.get("WIDGET_API_HOST", "0.0.0.0")
+    api_port = int(os.environ.get("WIDGET_API_PORT", os.environ.get("PORT", "8080")))
+    try:
+        await start_widget_server(host=api_host, port=api_port)
+    except Exception as e:
+        logger.warning("Не удалось запустить HTTP сервер виджетов на порту %s: %s", api_port, e)
+
     try:
         await send_startup_notices(app)
     except Exception:
         logger.exception("Не удалось отправить стартовое уведомление")
+
+
+async def post_shutdown(app):
+    try:
+        await stop_widget_server()
+    except Exception:
+        pass
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -3404,6 +3577,66 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = get_setting(user_id, "warn_limit", "1")
         set_setting(user_id, "warn_limit", "1" if cur == "0" else "0")
         await refresh_settings(query, user_id)
+
+    elif data == "toggle_compact_mode":
+        cur = get_setting(user_id, "compact_mode", "0")
+        new_val = "1" if cur == "0" else "0"
+        set_setting(user_id, "compact_mode", new_val)
+        status = "включены (короткий аккуратный ответ при записи)" if new_val == "1" else "выключены (полный дневной отчёт)"
+        await query.message.reply_text(f"💬 Компактные ответы: *{status}*.", parse_mode="Markdown")
+        await refresh_settings(query, user_id)
+
+    elif data in ["open_widgets_hub", "menu_widgets"]:
+        await show_widgets_info(update, context)
+        return
+
+    elif data == "rotate_widget_token":
+        new_tok = rotate_widget_token(user_id)
+        await query.answer("Токен обновлен!")
+        await query.message.reply_text(
+            f"🔄 *Ваш токен виджетов успешно обновлен!*\n\nНовый токен:\n`{new_tok}`\n\n"
+            "Не забудьте обновить токен в ваших виджетах Scriptable или Apple Shortcuts.",
+            parse_mode="Markdown",
+        )
+        return
+
+    elif data == "menu_piggy":
+        await query.answer()
+        text, markup = build_piggy_history(user_id)
+        await query.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+        return
+
+    elif data == "menu_history":
+        await query.answer()
+        await show_history(update, context)
+        return
+
+    elif data == "piggy_set_goal":
+        context.user_data["state"] = "wait_piggy_goal"
+        await query.message.reply_text(
+            "🎯 *Установка финансовой цели в копилке*\n\n"
+            "Напишите название цели и сумму (например: `Отпуск 100000` или `Ноутбук 85000`):",
+            parse_mode="Markdown",
+        )
+        return
+
+    elif data == "piggy_clear_goal":
+        clear_piggy_goal(user_id)
+        await query.answer("Цель сброшена")
+        text, markup = build_piggy_history(user_id)
+        await query.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+        return
+
+    elif data.startswith("show_full_day_"):
+        d_str = data.removeprefix("show_full_day_")
+        try:
+            target_d = datetime.date.fromisoformat(d_str)
+        except ValueError:
+            target_d = today_date()
+        report_text, markup = build_day_report(user_id, target_d)
+        await query.answer()
+        await query.message.reply_text(report_text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+        return
 
     elif data == "toggle_auto_category":
         cur = get_setting(user_id, "auto_category", "1")
@@ -3968,6 +4201,25 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if state == "wait_piggy_goal":
+        parsed = parse_label_amount(text)
+        if not parsed:
+            await update.message.reply_text(
+                "🤔 Не понял цель. Напишите название и сумму, например: `Отпуск 100000`",
+                parse_mode="Markdown",
+            )
+            return
+        target, title = parsed
+        set_piggy_goal(user_id, title, target)
+        context.user_data.clear()
+        text_resp, markup = build_piggy_history(user_id)
+        await update.message.reply_text(
+            f"🎯 Финансовая цель *«{esc(title)}»* на *{fmt_money(target)}* сохранена!\n\n{text_resp}",
+            parse_mode="Markdown",
+            reply_markup=markup or MAIN_KB,
+        )
+        return
+
     if state == "wait_daily_income":
         val = parse_amount(text)
         if val is None:
@@ -4115,12 +4367,27 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         report_text, markup = build_day_report(user_id, spent_d, extra_rows=chips)
         merch_str = f" ({esc(merchant)})" if merchant else ""
-        await update.message.reply_text(
-            f"🧾 Распознана оплата: *{fmt_money(amount)}* — {esc(category)}{merch_str}\n\n"
-            f"{warning}{report_text}",
-            parse_mode="Markdown",
-            reply_markup=markup or MAIN_KB,
-        )
+        compact_on = get_setting(user_id, "compact_mode", "0") == "1"
+        if compact_on:
+            rem = max(0.0, get_budget_info(user_id, spent_d)["daily_limit"] - (before + amount))
+            compact_text = (
+                f"🧾 Оплата: *{fmt_money(amount)}* — {esc(category)}{merch_str}\n"
+                f"📊 Остаток на сегодня: *{fmt_money(rem)}*\n{warning}"
+            )
+            compact_kb_rows = list(chips) if chips else []
+            compact_kb_rows.append([InlineKeyboardButton("📊 Полный отчёт дня", callback_data=f"show_full_day_{spent_d.isoformat()}")])
+            await update.message.reply_text(
+                compact_text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(compact_kb_rows),
+            )
+        else:
+            await update.message.reply_text(
+                f"🧾 Распознана оплата: *{fmt_money(amount)}* — {esc(category)}{merch_str}\n\n"
+                f"{warning}{report_text}",
+                parse_mode="Markdown",
+                reply_markup=markup or MAIN_KB,
+            )
         return
 
     parsed = parse_expense_message(text)
@@ -4194,12 +4461,27 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warning = limit_warning(user_id, spent_d, before, before + amount)
     extra = suggestion_rows(user_id, exp_id, category, was_default, similar, candidates=candidate_chips)
     report_text, markup = build_day_report(user_id, spent_d, extra_rows=extra)
-    await update.message.reply_text(
-        f"✅ Записано: *{fmt_money(amount)}* — {esc(category)} ({spent_d.strftime('%d.%m')}){note_hint}\n\n"
-        f"{warning}{report_text}",
-        parse_mode="Markdown",
-        reply_markup=markup or MAIN_KB,
-    )
+    compact_on = get_setting(user_id, "compact_mode", "0") == "1"
+    if compact_on:
+        rem = max(0.0, get_budget_info(user_id, spent_d)["daily_limit"] - (before + amount))
+        compact_text = (
+            f"✅ Записано: *{fmt_money(amount)}* — {esc(category)} ({spent_d.strftime('%d.%m')}){note_hint}\n"
+            f"📊 Остаток на сегодня: *{fmt_money(rem)}*\n{warning}"
+        )
+        compact_kb_rows = list(extra) if extra else []
+        compact_kb_rows.append([InlineKeyboardButton("📊 Полный отчёт дня", callback_data=f"show_full_day_{spent_d.isoformat()}")])
+        await update.message.reply_text(
+            compact_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(compact_kb_rows),
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Записано: *{fmt_money(amount)}* — {esc(category)} ({spent_d.strftime('%d.%m')}){note_hint}\n\n"
+            f"{warning}{report_text}",
+            parse_mode="Markdown",
+            reply_markup=markup or MAIN_KB,
+        )
 
 
 def main():
@@ -4242,7 +4524,14 @@ def main():
     logger.info("Бот запущен. Часовой пояс: %s, база: %s", TZ_NAME, DB_PATH)
 
     persistence = PicklePersistence(filepath=STATE_PATH)
-    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .persistence(persistence)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     if app.job_queue:
         app.job_queue.run_repeating(daily_reminder_job, interval=60, first=10)
@@ -4270,9 +4559,13 @@ def main():
     app.add_handler(CommandHandler("categories", show_categories))
     app.add_handler(CommandHandler("fix_categories", fix_categories_cmd))
     app.add_handler(CommandHandler("recategorize", fix_categories_cmd))
+    app.add_handler(CommandHandler("widget", show_widgets_info))
+    app.add_handler(CommandHandler("widgets", show_widgets_info))
+    app.add_handler(CommandHandler("app", show_widgets_info))
     app.add_handler(CommandHandler("menu", show_menu_hub))
     app.add_handler(CommandHandler("help", help_cmd))
 
+    app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))

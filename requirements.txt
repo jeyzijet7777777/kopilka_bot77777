@@ -5,3 +5,4 @@ tzdata
 pillow>=10.0,<14
 zxing-cpp>=3.0,<4
 rapidocr-onnxruntime>=1.2,<2
+aiohttp>=3.9,<4

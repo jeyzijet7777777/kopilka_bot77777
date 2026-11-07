@@ -1,0 +1,138 @@
+import asyncio
+import pytest
+import bot
+from aiohttp import web
+from kopilka.database.connection import db
+from kopilka.services.widget_api import (
+    create_widget_app,
+    get_or_create_widget_token,
+    rotate_widget_token,
+    get_user_id_by_token,
+    get_widget_summary_data,
+    add_widget_expense_sync,
+    configure_api,
+)
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(bot, "DATA_DIR", str(data))
+    monkeypatch.setattr(bot, "DB_PATH", str(data / "budget.db"))
+    import kopilka.config as kconfig
+    monkeypatch.setattr(kconfig, "DB_PATH", str(data / "budget.db"))
+    bot.init_db()
+    return data
+
+def test_widget_token_management(env):
+    uid = 42
+    tok1 = get_or_create_widget_token(uid)
+    assert tok1 and len(tok1) >= 16
+    assert get_or_create_widget_token(uid) == tok1
+    assert get_user_id_by_token(tok1) == uid
+
+    tok2 = rotate_widget_token(uid)
+    assert tok2 != tok1
+    assert get_user_id_by_token(tok1) is None
+    assert get_user_id_by_token(tok2) == uid
+
+def test_add_widget_expense_and_summary(env):
+    uid = 42
+    tok = get_or_create_widget_token(uid)
+
+    configure_api(
+        budget_info_fn=lambda u, d: {"daily_limit": 2000.0, "piggy_total": 5000.0},
+        change_pool_fn=lambda u, d: 300.0,
+        day_spent_fn=None, # use db
+        bot_username="kopilka_test_bot",
+    )
+
+    s1 = get_widget_summary_data(uid)
+    assert s1["daily_limit"] == 2000.0
+    assert s1["daily_spent"] == 0.0
+    assert s1["daily_remaining"] == 2000.0
+
+    res = add_widget_expense_sync(uid, amount=450, category="Продукты")
+    assert res["ok"] is True
+    assert res["amount"] == 450.0
+
+    s2 = get_widget_summary_data(uid)
+    assert s2["daily_spent"] == 450.0
+    assert s2["daily_remaining"] == 1550.0
+
+    # Add via text
+    res_text = add_widget_expense_sync(uid, text="350 кофе")
+    assert res_text["ok"] is True
+    assert res_text["amount"] == 350.0
+
+    s3 = get_widget_summary_data(uid)
+    assert s3["daily_spent"] == 800.0
+    assert s3["daily_remaining"] == 1200.0
+
+def test_widget_http_endpoints(env):
+    async def _run():
+        uid = 42
+        tok = get_or_create_widget_token(uid)
+
+        app = create_widget_app()
+        from aiohttp.test_utils import TestServer, TestClient
+        client = TestClient(TestServer(app))
+        await client.start_server()
+
+        try:
+            # 1. Health
+            resp = await client.get("/health")
+            assert resp.status == 200
+            j = await resp.json()
+            assert j["ok"] is True
+
+            # 2. Summary
+            resp = await client.get(f"/api/v1/{tok}/summary")
+            assert resp.status == 200
+            summary = await resp.json()
+            assert summary["ok"] is True
+            assert "daily_remaining" in summary
+
+            # 3. Add expense via POST JSON
+            resp = await client.post(
+                f"/api/v1/{tok}/expense",
+                json={"amount": 500, "category": "Кафе"},
+            )
+            assert resp.status == 200
+            add_res = await resp.json()
+            assert add_res["ok"] is True
+            assert add_res["amount"] == 500.0
+            exp_id = add_res["expense_id"]
+
+            # 4. Delete expense
+            del_resp = await client.post(f"/api/v1/{tok}/expense/{exp_id}")
+            assert del_resp.status == 200
+            del_j = await del_resp.json()
+            assert del_j["ok"] is True
+
+            # 5. Scriptable js
+            js_resp = await client.get(f"/api/v1/{tok}/scriptable")
+            assert js_resp.status == 200
+            js_text = await js_resp.text()
+            assert "Scriptable" in js_text
+            assert tok in js_text
+
+            # 6. Shortcuts HTML
+            sc_resp = await client.get(f"/api/v1/{tok}/shortcuts")
+            assert sc_resp.status == 200
+            sc_html = await sc_resp.text()
+            assert "Быстрые команды" in sc_html
+
+            # 7. KWGT HTML
+            kwgt_resp = await client.get(f"/api/v1/{tok}/kwgt")
+            assert kwgt_resp.status == 200
+
+            # 8. Web App HTML
+            wa_resp = await client.get(f"/webapp/{tok}")
+            assert wa_resp.status == 200
+            wa_html = await wa_resp.text()
+            assert "Mini App" in wa_html
+        finally:
+            await client.close()
+
+    asyncio.run(_run())
