@@ -67,6 +67,7 @@ from kopilka.services.categorizer import (
     classify_expense,
     save_user_category_rule,
     CATEGORIES_CATALOG,
+    recategorize_user_expenses,
 )
 from kopilka.services.receipt_scanner import (
     scan_receipt_image,
@@ -1024,6 +1025,7 @@ def settings_inline_kb(user_id: int):
         [InlineKeyboardButton(f"📅 Дней в месяце: {days_label}", callback_data="set_days_count")],
         [InlineKeyboardButton(f"⏰ Время отчёта, {TZ_LABEL} (сейчас {reminder_time})", callback_data="set_reminder_time")],
         [InlineKeyboardButton(f"🪄 Умные категории трат: {'вкл' if auto_cat_on else 'выкл'}", callback_data="toggle_auto_category")],
+        [InlineKeyboardButton("🪄 Исправить старые категории трат", callback_data="run_fix_categories")],
         [InlineKeyboardButton(f"📈 График в вечернем отчёте: {'вкл' if chart_on else 'выкл'}", callback_data="toggle_report_chart")],
         [InlineKeyboardButton(f"📅 Отчёт за месяц 1-го числа: {'вкл' if month_report_on else 'выкл'}", callback_data="toggle_month_report")],
         [InlineKeyboardButton(f"📆 Сводка за неделю по понедельникам: {'вкл' if week_on else 'выкл'}", callback_data="toggle_week_summary")],
@@ -2408,6 +2410,41 @@ async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
 
 
+async def fix_categories_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    is_adm = is_admin(update)
+    target_uid = None if is_adm and context.args and context.args[0].lower() == "all" else user_id
+
+    res = recategorize_user_expenses(user_id=target_uid)
+    scanned = res["total_scanned"]
+    updated = res["updated_count"]
+    changes = res["changes"]
+
+    if updated == 0:
+        await update.message.reply_text(
+            "✨ *Все категории уже в полном порядке!*\n"
+            f"Проверено трат: {scanned}. Неправильных или разрозненных категорий не обнаружено.",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KB,
+        )
+        return
+
+    lines = [
+        "🪄 *Категории успешно обновлены!*",
+        f"• Всего проверено трат: *{scanned}*",
+        f"• Исправлено категорий: *{updated}*\n",
+        "*Произведённые изменения:*",
+    ]
+    sorted_changes = sorted(changes.items(), key=lambda kv: kv[1], reverse=True)[:15]
+    for (old_c, new_c), count in sorted_changes:
+        lines.append(f"• `{esc(old_c)}` → *{esc(new_c)}* ({count} шт.)")
+
+    if len(changes) > 15:
+        lines.append(f"_... и ещё {len(changes) - 15} категорий_")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=MAIN_KB)
+
+
 def parse_month_key(user_id: int, key: str):
     """'2026-10' -> дата 1-го числа, если месяц есть в истории пользователя, иначе None."""
     if not re.fullmatch(r"\d{4}-\d{2}", key or ""):
@@ -3335,6 +3372,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting(user_id, "auto_category", "0" if cur != "0" else "1")
         await refresh_settings(query, user_id)
 
+    elif data == "run_fix_categories":
+        res = recategorize_user_expenses(user_id=user_id)
+        scanned = res["total_scanned"]
+        updated = res["updated_count"]
+        changes = res["changes"]
+        if updated == 0:
+            msg_text = "✨ *Все категории уже в полном порядке!*\nНеправильных или разрозненных категорий не найдено."
+        else:
+            lines = [
+                "🪄 *Категории успешно обновлены!*",
+                f"• Проверено трат: *{scanned}*",
+                f"• Исправлено трат: *{updated}*\n",
+                "*Произведённые изменения:*",
+            ]
+            sorted_changes = sorted(changes.items(), key=lambda kv: kv[1], reverse=True)[:10]
+            for (old_c, new_c), count in sorted_changes:
+                lines.append(f"• `{esc(old_c)}` → *{esc(new_c)}* ({count} шт.)")
+            msg_text = "\n".join(lines)
+        await query.message.reply_text(msg_text, parse_mode="Markdown")
+        await refresh_settings(query, user_id)
+
     elif data == "set_days_count":
         context.user_data["state"] = "wait_days_count"
         await query.message.reply_text(
@@ -4107,6 +4165,8 @@ def main():
     app.add_handler(CommandHandler("bills", show_bills))
     app.add_handler(CommandHandler("mandatory", show_bills))
     app.add_handler(CommandHandler("categories", show_categories))
+    app.add_handler(CommandHandler("fix_categories", fix_categories_cmd))
+    app.add_handler(CommandHandler("recategorize", fix_categories_cmd))
     app.add_handler(CommandHandler("menu", show_menu_hub))
     app.add_handler(CommandHandler("help", help_cmd))
 

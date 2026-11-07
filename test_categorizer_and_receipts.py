@@ -310,3 +310,63 @@ def test_bot_document_handler_records_receipt_file(clean_db):
         row = conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchone()
     assert row["amount"] == 620.0
     assert "Чек успешно распознан" in msg.edits[0][0]
+
+
+# ---------- 3. Тесты исправления существующих категорий в базе ----------
+
+def test_recategorize_user_expenses(clean_db):
+    with db() as conn:
+        conn.executemany(
+            "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+            [
+                (1, "2026-11-01", 100.0, "молоко"),
+                (1, "2026-11-02", 250.0, "шаурма"),
+                (1, "2026-11-03", 2000.0, "лукойл"),
+                (1, "2026-11-04", 50.0, "редкийнеизвестныйтовар"),
+            ],
+        )
+
+    from kopilka.services.categorizer import recategorize_user_expenses
+    res = recategorize_user_expenses(user_id=1)
+
+    assert res["total_scanned"] == 4
+    assert res["updated_count"] == 3
+
+    with db() as conn:
+        rows = {r["amount"]: r["category"] for r in conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchall()}
+
+    assert rows[100.0] == "Продукты"
+    assert rows[250.0] == "Кафе и рестораны"
+    assert rows[2000.0] == "Авто"
+    assert rows[50.0] == "редкийнеизвестныйтовар"
+
+
+def test_fix_categories_cmd_and_button(clean_db):
+    with db() as conn:
+        conn.executemany(
+            "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+            [
+                (1, "2026-11-01", 450.0, "пятерочка"),
+                (1, "2026-11-02", 350.0, "яндекс такси"),
+            ],
+        )
+
+    upd, msg = make_update(text="/fix_categories")
+    ctx = make_ctx()
+    ctx.args = []
+    run(bot.fix_categories_cmd(upd, ctx))
+
+    assert "Категории успешно обновлены" in msg.replies[0][0]
+    assert "пятерочка" in msg.replies[0][0]
+    assert "Продукты" in msg.replies[0][0]
+
+    with db() as conn:
+        cats = [r["category"] for r in conn.execute("SELECT category FROM expenses WHERE user_id = 1").fetchall()]
+    assert "Продукты" in cats
+    assert "Транспорт" in cats
+
+    # Повторный вызов — сообщает что всё в порядке
+    upd2, msg2 = make_update(text="/fix_categories")
+    run(bot.fix_categories_cmd(upd2, ctx))
+    assert "Все категории уже в полном порядке" in msg2.replies[0][0]
+

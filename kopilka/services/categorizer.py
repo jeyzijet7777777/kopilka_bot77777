@@ -390,3 +390,51 @@ def classify_expense(
 
     # Не найдено совпадений
     return "Разное", None
+
+
+def recategorize_user_expenses(user_id: int | None = None, db_path: str = None) -> dict:
+    """Проходит по всем тратам (или тратам конкретного user_id)
+
+    и обновляет категории, которые соответствуют ключевым словам/товарам/брендам
+    из каталога или персональным правилам.
+    """
+    with db(db_path) as conn:
+        if user_id is not None:
+            rows = conn.execute(
+                "SELECT id, user_id, category FROM expenses WHERE user_id = ? ORDER BY id",
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, user_id, category FROM expenses ORDER BY id"
+            ).fetchall()
+
+        # Категории, которые уже использовались пользователями
+        user_cats_map: dict[int, list[str]] = {}
+        for r in conn.execute("SELECT DISTINCT user_id, category FROM expenses").fetchall():
+            user_cats_map.setdefault(r["user_id"], []).append(r["category"])
+
+        changes: dict[tuple[str, str], int] = {}
+        updated_count = 0
+
+        for r in rows:
+            uid = r["user_id"]
+            old_cat = r["category"]
+            exp_id = r["id"]
+
+            existing = user_cats_map.get(uid, [])
+            filtered_existing = [c for c in existing if _clean_token(c) != _clean_token(old_cat)]
+            new_cat, matched_kw = classify_expense(uid, old_cat, filtered_existing)
+
+            # Если найдено совпадение по каталогу и категория изменилась
+            if matched_kw and new_cat and new_cat != "Разное" and _clean_token(new_cat) != _clean_token(old_cat):
+                conn.execute("UPDATE expenses SET category = ? WHERE id = ?", (new_cat, exp_id))
+                changes[(old_cat, new_cat)] = changes.get((old_cat, new_cat), 0) + 1
+                updated_count += 1
+
+        return {
+            "total_scanned": len(rows),
+            "updated_count": updated_count,
+            "changes": changes,
+        }
+
