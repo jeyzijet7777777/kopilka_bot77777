@@ -1,6 +1,0 @@
-.env
-budget.db
-Бюджет_*.xlsx
-__pycache__/
-venv/
-*.pyc

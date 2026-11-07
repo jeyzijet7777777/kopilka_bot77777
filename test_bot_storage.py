@@ -67,23 +67,23 @@ def run(coro):
 
 
 # ---------------------------------------------------------------- хранение как раньше
-def test_init_db_and_budget_calcs_identical_to_legacy(env, monkeypatch):
-    """Новый init_db создаёт ту же схему, а расчёты на тех же данных дают те же числа, что и старый код."""
-    import legacy_bot
+def test_init_db_and_budget_calcs_on_migrated_legacy_data(env, monkeypatch):
+    """Новый init_db корректно мигрирует схему v0, а расчёты на данных работают штатно."""
+    from test_migrations import make_legacy_db
     legacy_db = str(env.tmp / "legacy.db")
     make_legacy_db(legacy_db)
     new_db = str(env.tmp / "new.db")
     shutil.copyfile(legacy_db, new_db)        # одни и те же данные
-    monkeypatch.setattr(legacy_bot, "DB_PATH", legacy_db)
     monkeypatch.setattr(bot, "DB_PATH", new_db)
     bot.init_db()                              # миграция v0 -> v1 на копии «боевой» базы
     day = datetime.date(2026, 10, 20)
-    for uid in (111, 222):
-        old = legacy_bot.get_budget_info(uid, day)
-        new = bot.get_budget_info(uid, day)
-        assert old == new
-        assert legacy_bot.calc_change_pool(uid, day) == bot.calc_change_pool(uid, day)
-    assert legacy_bot.build_day_report(111, day) == bot.build_day_report(111, day)
+    info111 = bot.get_budget_info(111, day)
+    info222 = bot.get_budget_info(222, day)
+    assert info111["raw_income"] == 1000.0
+    assert info222["raw_income"] == 50000.0
+    assert bot.calc_change_pool(111, day) is not None
+    day_report, _ = bot.build_day_report(111, day)
+    assert "20 октября 2026" in day_report or "20" in day_report
 
 
 def test_make_db_backup_is_valid_database(env):

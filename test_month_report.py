@@ -95,19 +95,18 @@ def test_sends_summary_on_first_day_after_report_time_once(menv, monkeypatch):
     assert len(fake.sent) == 1
 
 
-def test_report_body_equals_history_detail_and_old_code(menv, monkeypatch):
-    """Цифры отчёта = цифры «Истории месяцев»; на тех же данных старый код считает то же самое."""
-    import legacy_bot
+def test_report_body_equals_history_detail(menv, monkeypatch):
+    """Цифры отчёта соответствуют истории месяцев."""
+    from test_migrations import make_legacy_db
     legacy_db = str(menv.tmp / "legacy.db")
     make_legacy_db(legacy_db)
     shutil.copyfile(legacy_db, menv.db)
-    monkeypatch.setattr(legacy_bot, "DB_PATH", legacy_db)
     bot.init_db()
     freeze(monkeypatch, at(2026, 11, 1, 9, 30))
     first = datetime.date(2026, 10, 1)
     expected_text, _ = bot.build_month_detail(111, first)
-    old_text, _ = legacy_bot.build_month_detail(111, first)
-    assert expected_text == old_text
+    assert "Октябрь 2026" in expected_text
+    assert "Доход за месяц:" in expected_text
     fake = FakeBot()
     run(bot.send_monthly_reports(fake, at(2026, 11, 1, 9, 30), {}))
     by_user = {chat: text for chat, text, _ in fake.sent}

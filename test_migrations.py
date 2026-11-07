@@ -34,11 +34,81 @@ def dump(path):
         conn.close()
 
 
+def init_legacy_schema(path):
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            user_id INTEGER,
+            key TEXT,
+            value TEXT,
+            PRIMARY KEY (user_id, key)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS mandatory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            amount REAL NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            spent_date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            category TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS savings_topups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            topup_date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            comment TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            expense_id INTEGER
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS day_limits (
+            user_id INTEGER NOT NULL,
+            day TEXT NOT NULL,
+            daily_limit REAL NOT NULL,
+            PRIMARY KEY (user_id, day)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS month_settings (
+            user_id INTEGER NOT NULL,
+            month TEXT NOT NULL,
+            income_mode TEXT NOT NULL,
+            raw_income REAL NOT NULL,
+            save REAL NOT NULL,
+            days_in_month INTEGER NOT NULL,
+            mandatory_json TEXT NOT NULL,
+            estimated INTEGER NOT NULL DEFAULT 0,
+            closed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (user_id, month)
+        )
+    """)
+    conn.execute(
+        "INSERT OR IGNORE INTO settings (user_id, key, value) VALUES (0, 'archive_launch', ?)",
+        (TODAY.isoformat(),),
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_exp_user_date ON expenses (user_id, spent_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_top_user_date ON savings_topups (user_id, topup_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mand_user ON mandatory (user_id)")
+    conn.commit()
+    conn.close()
+
+
 def make_legacy_db(path):
-    """База, созданная СТАРЫМ кодом (оригинальный bot.py до моих правок), и наполненная данными."""
-    import legacy_bot
-    legacy_bot.DB_PATH = path
-    legacy_bot.init_db()
+    init_legacy_schema(path)
     conn = sqlite3.connect(path)
     conn.executemany("INSERT INTO settings (user_id,key,value) VALUES (?,?,?)", [
         (111, "daily_income", "1000"), (111, "income_mode", "daily"), (111, "start_date", "2026-10-01"),
@@ -63,10 +133,8 @@ def make_legacy_db(path):
 
 
 def test_fresh_db_schema_equals_legacy_init_db(tmp_path):
-    import legacy_bot
     old, new = str(tmp_path / "old.db"), str(tmp_path / "new.db")
-    legacy_bot.DB_PATH = old
-    legacy_bot.init_db()
+    init_legacy_schema(old)
     applied = migrations.migrate(new, TODAY, backup_dir=str(tmp_path / "bk"))
     assert applied == [1, 2]
     old_s, new_s = schema(old), schema(new)
