@@ -1961,12 +1961,28 @@ def menu_hub_kb() -> InlineKeyboardMarkup:
     ])
 
 
+async def show_app_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    token = get_or_create_widget_token(user_id)
+    base_url = (os.environ.get("WIDGET_API_BASE_URL") or "https://bot-1793275701-1092-jeyzi008.bothost.tech").rstrip("/")
+    webapp_url = f"{base_url}/webapp/{token}"
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📱 Открыть Web App", web_app=WebAppInfo(url=webapp_url))
+    ]])
+    await update.message.reply_text(
+        "📱 *Интерактивный Web App «Копилка»*\n\n"
+        "Нажмите кнопку ниже, чтобы открыть дашборд трат, баланс и банк сдачи прямо в Telegram:",
+        parse_mode="Markdown",
+        reply_markup=markup,
+    )
+
+
 async def show_widgets_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     token = get_or_create_widget_token(user_id)
 
     port = int(os.environ.get("WIDGET_API_PORT", os.environ.get("PORT", "8080")))
-    base_url = os.environ.get("WIDGET_API_BASE_URL", f"http://localhost:{port}").rstrip("/")
+    base_url = (os.environ.get("WIDGET_API_BASE_URL") or "https://bot-1793275701-1092-jeyzi008.bothost.tech").rstrip("/")
     summary_url = f"{base_url}/api/v1/{token}/summary"
     scriptable_url = f"{base_url}/api/v1/{token}/scriptable"
     shortcuts_url = f"{base_url}/api/v1/{token}/shortcuts"
@@ -4561,7 +4577,7 @@ def main():
     app.add_handler(CommandHandler("recategorize", fix_categories_cmd))
     app.add_handler(CommandHandler("widget", show_widgets_info))
     app.add_handler(CommandHandler("widgets", show_widgets_info))
-    app.add_handler(CommandHandler("app", show_widgets_info))
+    app.add_handler(CommandHandler("app", show_app_cmd))
     app.add_handler(CommandHandler("menu", show_menu_hub))
     app.add_handler(CommandHandler("help", help_cmd))
 

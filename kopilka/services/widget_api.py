@@ -244,8 +244,12 @@ def _get_base_url(request: web.Request) -> str:
     env_base = os.environ.get("WIDGET_API_BASE_URL")
     if env_base:
         return env_base.rstrip("/")
+    if "bothost.tech" in request.host:
+        return f"https://{request.host}"
     scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
     host = request.headers.get("X-Forwarded-Host", request.host)
+    if "bothost.tech" in host:
+        return f"https://{host}"
     return f"{scheme}://{host}"
 
 

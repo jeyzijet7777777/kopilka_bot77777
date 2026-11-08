@@ -12,12 +12,17 @@ ENV PYTHONUNBUFFERED=1 \
     MPLBACKEND=Agg \
     DATA_DIR=/app/data \
     DB_PATH=/app/data/budget.db \
-    STATE_PATH=/app/data/bot_state.pkl
+    STATE_PATH=/app/data/bot_state.pkl \
+    WIDGET_API_PORT=8080 \
+    WIDGET_API_BASE_URL=https://bot-1793275701-1092-jeyzi008.bothost.tech
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN mkdir -p /app/data
+COPY kopilka ./kopilka
 COPY *.py template.xlsx ./
+
+EXPOSE 8080
 
 CMD ["python", "bot.py"]
