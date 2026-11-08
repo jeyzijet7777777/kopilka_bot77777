@@ -232,6 +232,21 @@ def init_db():
     """Приводит базу к актуальной схеме версионными миграциями (см. migrations.py)."""
     os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     migrations.migrate(DB_PATH, today_date(), backup_dir=BACKUP_DIR)
+    try:
+        res = recategorize_user_expenses(db_path=DB_PATH)
+        if res.get("updated_count"):
+            logger.info("Авто-рекатегоризация при старте: обновлено %s трат", res["updated_count"])
+    except Exception:
+        logger.exception("Не удалось выполнить авто-рекатегоризацию при старте")
+
+
+def _msg(update: Update):
+    """Безопасное получение объекта сообщения и из обычного сообщения, и из CallbackQuery."""
+    return (
+        getattr(update, "effective_message", None)
+        or getattr(update, "message", None)
+        or (update.callback_query.message if getattr(update, "callback_query", None) else None)
+    )
 
 
 def get_setting(user_id: int, key: str, default=None):
@@ -698,6 +713,9 @@ def canonical_category(user_id: int, name: str) -> str:
     for existing in used_categories(user_id):
         if cat_key(existing) == k:
             return existing
+    for cat_name in CATEGORIES_CATALOG:
+        if cat_key(cat_name) == k:
+            return cat_name
     return " ".join(name.split())
 
 
@@ -1269,11 +1287,20 @@ def collect_month(user_id: int, month: datetime.date = None):
             "WHERE user_id = ? AND spent_date LIKE ? GROUP BY spent_date",
             (user_id, prefix + "%"),
         ).fetchall()
-        cat_rows = conn.execute(
+        raw_cat_rows = conn.execute(
             "SELECT category, SUM(amount) AS total FROM expenses "
             "WHERE user_id = ? AND spent_date LIKE ? GROUP BY category ORDER BY total DESC",
             (user_id, prefix + "%"),
         ).fetchall()
+    merged_cats = {}
+    for r in raw_cat_rows:
+        m = merged_cats.setdefault(cat_key(r["category"]), {"total": 0.0, "best": (0.0, "")})
+        m["total"] += r["total"]
+        m["best"] = max(m["best"], (r["total"], r["category"]))
+    cat_rows = sorted(
+        [{"category": m["best"][1], "total": m["total"]} for m in merged_cats.values()],
+        key=lambda x: (-x["total"], x["category"]),
+    )
     by_day = {int(r["spent_date"].split("-")[2]): r["total"] for r in day_rows}
     return today, info, start, by_day, cat_rows
 
@@ -1513,10 +1540,14 @@ def chart_structure(user_id: int, month: datetime.date = None) -> io.BytesIO:
         title1 += f" (дефицит {fmt_num(-info['available'])} ₽)"
     ax1.set_title(title1, fontsize=11, fontweight="bold")
 
-    top = [(r["category"], r["total"]) for r in cats[:7]]
-    other = sum(r["total"] for r in cats[7:])
+    misc_keys = {"разное", "прочее"}
+    main_cats = [r for r in cats if cat_key(r["category"]) not in misc_keys]
+    misc_total = sum(r["total"] for r in cats if cat_key(r["category"]) in misc_keys)
+    top = [(r["category"], r["total"]) for r in main_cats[:7]]
+    other = sum(r["total"] for r in main_cats[7:]) + misc_total
     if other > 0:
-        top.append(("Прочее", other))
+        label = "Разное" if any(cat_key(r["category"]) == "разное" for r in cats) and not main_cats[7:] else "Прочее"
+        top.append((label, other))
     if top:
         names = [n if len(n) <= 22 else n[:21] + "…" for n, _ in top]
         vals = [v for _, v in top]
@@ -1989,7 +2020,7 @@ async def show_app_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     markup = InlineKeyboardMarkup([[
         InlineKeyboardButton("📱 Открыть Web App", web_app=WebAppInfo(url=webapp_url))
     ]])
-    await update.message.reply_text(
+    await _msg(update).reply_text(
         "📱 *Интерактивный Web App «Копилка»*\n\n"
         "Нажмите кнопку ниже, чтобы открыть дашборд трат, баланс и банк сдачи прямо в Telegram:",
         parse_mode="Markdown",
@@ -2080,13 +2111,13 @@ async def show_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     text, markup = build_day_report(user_id, today_d, extra_rows=today_nav)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+    await _msg(update).reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
 
 
 async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     context.user_data.clear()
-    await update.message.reply_text(
+    await _msg(update).reply_text(
         build_settings_text(user_id),
         parse_mode="Markdown",
         reply_markup=settings_inline_kb(user_id),
@@ -2118,7 +2149,7 @@ async def show_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{icon} *{cur.strftime('%d.%m')}*: {fmt_money(sp)} (остаток: {fmt_money(diff)})")
 
     lines.append(f"\n💸 *Всего за 7 дней:* {fmt_money(total_week)}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=MAIN_KB)
+    await _msg(update).reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=MAIN_KB)
 
 
 async def show_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2191,18 +2222,19 @@ async def show_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🏠 Обязательные счета", callback_data="bills_refresh"),
         ],
     ])
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=month_kb)
+    await _msg(update).reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=month_kb)
 
 
 async def send_chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_chart_kind(update.message, update.effective_user.id, "overview")
+    await send_chart_kind(_msg(update), update.effective_user.id, "overview")
 
 
 async def send_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    msg = _msg(update)
     try:
         buf = await asyncio.to_thread(update_excel_file, user_id)
-        await update.message.reply_document(
+        await msg.reply_document(
             document=buf,
             filename=f"Бюджет_{today_date().strftime('%m_%Y')}.xlsx",
             caption="📥 Ваша персональная таблица бюджета с деталями трат",
@@ -2210,11 +2242,12 @@ async def send_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception:
         logger.exception("Ошибка при формировании Excel:")
-        await update.message.reply_text("⚠️ Не удалось сформировать Excel. Попробуйте позже.", reply_markup=MAIN_KB)
+        await msg.reply_text("⚠️ Не удалось сформировать Excel. Попробуйте позже.", reply_markup=MAIN_KB)
 
 
 async def undo_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    msg = _msg(update)
     with db() as conn:
         exp = conn.execute(
             "SELECT id, amount, category, spent_date, created_at FROM expenses "
@@ -2227,7 +2260,7 @@ async def undo_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (user_id,),
         ).fetchone()
     if not exp and not top:
-        await update.message.reply_text("Операций для отмены пока нет.", reply_markup=MAIN_KB)
+        await msg.reply_text("Операций для отмены пока нет.", reply_markup=MAIN_KB)
         return
 
     if top and (not exp or (top["created_at"] or "") >= (exp["created_at"] or "")):
@@ -2235,7 +2268,7 @@ async def undo_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as conn:
             conn.execute("DELETE FROM savings_topups WHERE id = ? AND user_id = ?", (top["id"], user_id))
         sign = "+" if top["amount"] >= 0 else "−"
-        await update.message.reply_text(
+        await msg.reply_text(
             f"↩️ Отменена операция с копилкой: *{sign}{fmt_money(abs(top['amount']))}* "
             f"({esc(top['comment'])}, {top['topup_date']})",
             parse_mode="Markdown",
@@ -2244,7 +2277,7 @@ async def undo_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     delete_expense(user_id, exp["id"])
-    await update.message.reply_text(
+    await msg.reply_text(
         f"↩️ Удалена последняя трата: *{fmt_money(exp['amount'])}* ({esc(exp['category'])}, {exp['spent_date']})",
         parse_mode="Markdown",
         reply_markup=MAIN_KB,
@@ -2458,6 +2491,9 @@ def build_categories_report(user_id: int, month_first: datetime.date):
         InlineKeyboardButton("📊 По месяцам", callback_data=f"catx_{_month_key(month_first)}"),
         InlineKeyboardButton("📚 Месяцы", callback_data="months_list"),
     ])
+    rows.append([
+        InlineKeyboardButton("🪄 Упорядочить категории", callback_data="fix_cats_report"),
+    ])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
@@ -2512,11 +2548,12 @@ def build_categories_matrix(user_id: int, upto: datetime.date, n_months: int = 5
 
 async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, markup = build_categories_report(update.effective_user.id, today_date())
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+    await _msg(update).reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
 
 
 async def fix_categories_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    msg = _msg(update)
     is_adm = is_admin(update)
     target_uid = None if is_adm and context.args and context.args[0].lower() == "all" else user_id
 
@@ -2526,7 +2563,7 @@ async def fix_categories_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     changes = res["changes"]
 
     if updated == 0:
-        await update.message.reply_text(
+        await msg.reply_text(
             "✨ *Все категории уже в полном порядке!*\n"
             f"Проверено трат: {scanned}. Неправильных или разрозненных категорий не обнаружено.",
             parse_mode="Markdown",
@@ -2547,7 +2584,7 @@ async def fix_categories_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if len(changes) > 15:
         lines.append(f"_... и ещё {len(changes) - 15} категорий_")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=MAIN_KB)
+    await msg.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=MAIN_KB)
 
 
 def parse_month_key(user_id: int, key: str):
@@ -2817,7 +2854,6 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
             image_bytes,
             user_id=user_id,
             caption=caption or "",
-            user_existing_categories=used_categories(user_id),
         )
 
         if not result or not result.get("success") or not result.get("amount"):
@@ -3016,19 +3052,24 @@ async def restore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, d
 
 async def show_months(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, markup = build_months_overview(update.effective_user.id)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+    await _msg(update).reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
 
 
-def build_history(user_id: int):
+def build_history(user_id: int, page: int = 0):
+    per_page = 12
+    offset = max(0, page) * per_page
     with db() as conn:
         rows = conn.execute(
             "SELECT id, spent_date, amount, category FROM expenses WHERE user_id = ? "
-            "ORDER BY spent_date DESC, id DESC LIMIT 12",
-            (user_id,),
+            "ORDER BY spent_date DESC, id DESC LIMIT ? OFFSET ?",
+            (user_id, per_page + 1, offset),
         ).fetchall()
+    has_next = len(rows) > per_page
+    rows = rows[:per_page]
     if not rows:
         return "Трат пока нет. Запишите первую, например: `450 продукты`.", None
-    lines = ["🧾 *Последние траты* (✏️ — изменить сумму, категорию или дату, ❌ — удалить):", ""]
+    header = "🧾 *Последние траты*" if page == 0 else f"🧾 *Последние траты (стр. {page + 1})*"
+    lines = [f"{header} (✏️ — изменить сумму, категорию или дату, ❌ — удалить):", ""]
     buttons = []
     for r in rows:
         d = datetime.date.fromisoformat(r["spent_date"]).strftime("%d.%m")
@@ -3038,18 +3079,25 @@ def build_history(user_id: int):
             InlineKeyboardButton(title[:36], callback_data=f"xe_open_{r['id']}"),
             InlineKeyboardButton("❌", callback_data=f"hdelexp_{r['id']}"),
         ])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ Назад", callback_data=f"hist_page_{page - 1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton("Дальше ▶️", callback_data=f"hist_page_{page + 1}"))
+    if nav:
+        buttons.append(nav)
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, markup = build_history(update.effective_user.id)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+    await _msg(update).reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
 
 
 async def show_bills(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text, markup = build_bills_card(user_id)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+    await _msg(update).reply_text(text, parse_mode="Markdown", reply_markup=markup)
 
 
 def piggy_undo_kb(topup_id: int):
@@ -3103,7 +3151,7 @@ def build_piggy_history(user_id: int):
 
 async def show_piggy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, markup = build_piggy_history(update.effective_user.id)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
+    await _msg(update).reply_text(text, parse_mode="Markdown", reply_markup=markup or MAIN_KB)
 
 
 async def piggy_add(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, amount: float, comment: str):
@@ -3115,7 +3163,7 @@ async def piggy_add(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id:
         ).lastrowid
     context.user_data.clear()
     info = get_budget_info(user_id)
-    await update.message.reply_text(
+    await _msg(update).reply_text(
         f"💰 В копилку зачислено: *+{fmt_money(amount)}* ({esc(comment)})!\n"
         f"🏦 Всего в копилке: *{fmt_money(info['piggy_total'])}*\n"
         f"_Лимит на сегодня и дальше: {fmt_money(info['daily_limit'])} (прошлые дни не менялись)._",
@@ -3125,7 +3173,7 @@ async def piggy_add(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id:
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    await _msg(update).reply_text(
         "ℹ️ *Как пользоваться*\n\n"
         "Трата: `450 продукты`, `такси 300 вчера`, `1 500 одежда 28.10`\n"
         "Пополнить копилку: `+500 подработка`\n"
@@ -3320,15 +3368,31 @@ async def expense_edit_callback(update: Update, context: ContextTypes.DEFAULT_TY
     elif action == "cat":
         context.user_data.clear()
         context.user_data.update(state="wait_edit_cat", edit_exp_id=exp_id)
-        names = used_categories(user_id, limit=10, exclude=[row["category"]])
+        names = used_categories(user_id, limit=8, exclude=[row["category"]])
+        seen_keys = {cat_key(n) for n in names} | {cat_key(row["category"])}
+        for std_cat in CATEGORIES_CATALOG:
+            if len(names) >= 12:
+                break
+            if cat_key(std_cat) not in seen_keys:
+                names.append(std_cat)
+                seen_keys.add(cat_key(std_cat))
         rows = category_chips(user_id, exp_id, names)
         rows.append([InlineKeyboardButton("◀️ Назад", callback_data=f"xe_open_{exp_id}")])
-        hint = "Выберите из уже использованных или напишите новую категорию." if names else "Напишите новую категорию."
+        hint = "Выберите категорию из списка или напишите новую." if names else "Напишите новую категорию."
         await query.message.reply_text(
             f"🏷 Сейчас: *{esc(row['category'])}*.\n{hint} Отмена: /cancel.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(rows),
         )
+    elif action == "del":
+        context.user_data.clear()
+        spent_date_str = delete_expense(user_id, exp_id)
+        if not spent_date_str:
+            await query.message.reply_text("ℹ️ Эта трата уже удалена.")
+            return
+        target_d = datetime.date.fromisoformat(spent_date_str)
+        text, markup = build_day_report(user_id, target_d)
+        await safe_edit(query, f"🗑 Трата *{fmt_money(row['amount'])}* ({esc(row['category'])}) удалена.\n\n{text}", markup)
     elif action == "day":
         context.user_data.clear()
         text, markup = build_day_report(user_id, datetime.date.fromisoformat(row["spent_date"]))
@@ -3645,6 +3709,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_history":
         await query.answer()
         await show_history(update, context)
+        return
+
+    elif data.startswith("hist_page_"):
+        try:
+            page = max(0, int(data.removeprefix("hist_page_")))
+        except ValueError:
+            page = 0
+        text, markup = build_history(user_id, page=page)
+        await safe_edit(query, text, markup)
+        return
+
+    elif data == "fix_cats_report":
+        res = recategorize_user_expenses(user_id=user_id)
+        scanned = res["total_scanned"]
+        updated = res["updated_count"]
+        changes = res["changes"]
+        if updated == 0:
+            await query.message.reply_text(
+                "✨ *Все категории уже в полном порядке!*\nНеправильных или разрозненных категорий не найдено.",
+                parse_mode="Markdown",
+            )
+        else:
+            lines = [
+                "🪄 *Категории успешно обновлены!*",
+                f"• Проверено трат: *{scanned}*",
+                f"• Исправлено трат: *{updated}*\n",
+                "*Произведённые изменения:*",
+            ]
+            sorted_changes = sorted(changes.items(), key=lambda kv: kv[1], reverse=True)[:10]
+            for (old_c, new_c), count in sorted_changes:
+                lines.append(f"• `{esc(old_c)}` → *{esc(new_c)}* ({count} шт.)")
+            await query.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        text, markup = build_categories_report(user_id, today_date())
+        await safe_edit(query, text, markup)
         return
 
     elif data == "piggy_set_goal":
@@ -3999,18 +4097,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "menu_undo":
         await query.answer()
-        last = get_last_expense(user_id)
-        if not last:
-            await query.message.reply_text("ℹ️ Нет трат для отмены.")
-            return
-        delete_expense(user_id, last["id"])
-        day = datetime.date.fromisoformat(last["spent_date"])
-        text, markup = build_day_report(user_id, day)
-        await query.message.reply_text(
-            f"↩️ Отменена трата: *{fmt_money(last['amount'])}* — {esc(last['category'])}\n\n{text}",
-            parse_mode="Markdown",
-            reply_markup=markup or MAIN_KB,
-        )
+        await undo_last(update, context)
         return
 
 
@@ -4179,7 +4266,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cat_name = text.strip()
             auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
             if auto_cat_on:
-                classified_cat, _ = classify_expense(user_id, cat_name, used_categories(user_id))
+                classified_cat, _ = classify_expense(user_id, cat_name)
                 if classified_cat and classified_cat != "Разное":
                     cat_name = classified_cat
             cat_name = canonical_category(user_id, cat_name)
@@ -4386,7 +4473,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             spent_d = today_date()
         merchant = bank_parsed.get("merchant") or ""
         ensure_start_day(user_id)
-        classified_cat, _ = classify_expense(user_id, merchant, used_categories(user_id))
+        classified_cat, _ = classify_expense(user_id, merchant)
         category = canonical_category(user_id, classified_cat if classified_cat != "Разное" else (cap(merchant) or DEFAULT_CATEGORY))
         before = day_spent(user_id, spent_d)
         with db() as conn:
@@ -4477,11 +4564,15 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     note_hint = ""
     candidate_chips = None
 
-    if auto_cat_on and not was_default and not similar:
-        classified_cat, matched_kw = classify_expense(user_id, category, used_categories(user_id))
-        if classified_cat and classified_cat != "Разное" and cat_key(classified_cat) != cat_key(category):
+    if auto_cat_on and not was_default:
+        classified_cat, matched_kw = classify_expense(user_id, category)
+        is_typo_of_classified = bool(
+            similar and classified_cat and cat_key(similar) == cat_key(classified_cat)
+        )
+        if classified_cat and classified_cat != "Разное" and cat_key(classified_cat) != cat_key(category) and not is_typo_of_classified:
             raw_input = category
             category = classified_cat
+            similar = None
             note_hint = f"\n💡 _Категория подобрана по слову «{esc(raw_input)}»_"
             candidate_chips = [raw_input]
             context.user_data["last_auto_keyword"] = raw_input

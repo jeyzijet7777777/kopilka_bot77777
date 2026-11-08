@@ -428,3 +428,87 @@ def test_ask_category_for_number_flow(clean_db):
     assert row["category"] == "Продукты"
 
 
+def test_menu_history_and_menu_undo_callbacks_when_update_message_is_none(clean_db):
+    """В реальном Telegram при нажатии инлайн-кнопки update.message == None, а сообщение лежит в update.callback_query.message."""
+    with db() as conn:
+        for i in range(15):
+            conn.execute(
+                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                (1, "2026-11-04", 100.0 + i, "Продукты"),
+            )
+
+    # Нажатие «🧾 Траты» (menu_history) из инлайн-меню, когда update.message is None
+    upd, msg = make_update(data="menu_history")
+    upd.message = None
+    upd.effective_message = msg
+    ctx = make_ctx()
+    run(bot.callback_handler(upd, ctx))
+    assert len(msg.replies) == 1
+    assert "Последние траты" in msg.replies[0][0]
+    markup = msg.replies[0][1]["reply_markup"]
+    cbs_list = [b.callback_data for row in markup.inline_keyboard for b in row]
+    assert "hist_page_1" in cbs_list
+
+    # Переход на 2-ю страницу истории
+    upd_p2, msg_p2 = make_update(data="hist_page_1")
+    upd_p2.message = None
+    run(bot.callback_handler(upd_p2, ctx))
+    assert "стр. 2" in msg_p2.edits[0][0]
+
+    # Нажатие «↩️ Отменить последнюю» (menu_undo) из инлайн-меню, когда update.message is None
+    upd_undo, msg_undo = make_update(data="menu_undo")
+    upd_undo.message = None
+    upd_undo.effective_message = msg_undo
+    run(bot.callback_handler(upd_undo, ctx))
+    assert len(msg_undo.replies) == 1
+    assert "Удалена последняя трата" in msg_undo.replies[0][0]
+
+
+def test_xe_del_callback_deletes_expense(clean_db):
+    with db() as conn:
+        eid = conn.execute(
+            "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (1, '2026-11-04', 450.0, 'Продукты')"
+        ).lastrowid
+
+    upd, msg = make_update(data=f"xe_del_{eid}")
+    upd.message = None
+    run(bot.callback_handler(upd, make_ctx()))
+    assert bot.get_expense(1, eid) is None
+    assert "удалена" in msg.edits[0][0]
+
+
+def test_classify_everyday_items_and_context_phrases():
+    assert classify_expense(1, "Помело")[0] == "Продукты"
+    assert classify_expense(1, "От обветривания")[0] == "Здоровье"
+    assert classify_expense(1, "Почтовые конверты")[0] == "Дом"
+    assert classify_expense(1, "светофор")[0] == "Продукты"
+    assert classify_expense(1, "творожная масса")[0] == "Продукты"
+    assert classify_expense(1, "супа")[0] == "Продукты"
+    assert classify_expense(1, "жвачка")[0] == "Продукты"
+    assert classify_expense(1, "мороженка")[0] == "Продукты"
+    assert classify_expense(1, "для стирки")[0] == "Дом"
+    assert classify_expense(1, "от комаров")[0] == "Здоровье"
+
+
+def test_init_db_auto_recategorizes_existing_expenses(clean_db):
+    with db() as conn:
+        conn.executemany(
+            "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+            [
+                (1, "2026-11-01", 280.0, "Помело"),
+                (1, "2026-11-02", 148.0, "От обветривания"),
+                (1, "2026-11-03", 120.0, "Почтовые конверты"),
+            ],
+        )
+
+    bot.init_db()
+
+    with db() as conn:
+        rows = {r["amount"]: r["category"] for r in conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchall()}
+
+    assert rows[280.0] == "Продукты"
+    assert rows[148.0] == "Здоровье"
+    assert rows[120.0] == "Дом"
+
+
+

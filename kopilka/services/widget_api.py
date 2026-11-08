@@ -209,9 +209,8 @@ def add_widget_expense_sync(
         raise ValueError("Сумма расхода должна быть больше 0")
 
     cat_name = (category or "Разное").strip()
-    if _CLASSIFY_CAT and _USED_CATS and cat_name != "Разное":
-        used = _USED_CATS(user_id, 15)
-        classified, _ = _CLASSIFY_CAT(user_id, cat_name, used)
+    if _CLASSIFY_CAT and cat_name != "Разное":
+        classified, _ = _CLASSIFY_CAT(user_id, cat_name)
         if classified and classified != "Разное":
             cat_name = classified
 
