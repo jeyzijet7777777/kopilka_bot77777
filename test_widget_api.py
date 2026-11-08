@@ -132,6 +132,35 @@ def test_widget_http_endpoints(env):
             assert wa_resp.status == 200
             wa_html = await wa_resp.text()
             assert "Mini App" in wa_html
+            assert "grid-template-columns: 112px minmax(0, 1fr)" in wa_html
+            assert "overflow-x: hidden" in wa_html
+            assert "kopilka_token" in wa_resp.cookies
+
+            # 9. Opening /app after 1-time auth uses persistent cookie automatically
+            app_resp = await client.get("/app")
+            assert app_resp.status == 200
+            app_html = await app_resp.text()
+            assert f'const SERVER_TOKEN = "{tok}";' in app_html
+
+            # 10. One-time login endpoint (/api/v1/auth/login) with token or full URL
+            login_resp = await client.post("/api/v1/auth/login", json={"token": f"https://example.com/webapp/{tok}"})
+            assert login_resp.status == 200
+            login_j = await login_resp.json()
+            assert login_j["ok"] is True
+            assert login_j["token"] == tok
+
+            # 11. PWA Manifest, Service Worker, Icon
+            mf_resp = await client.get(f"/webapp/{tok}/manifest.json")
+            assert mf_resp.status == 200
+            mf_j = await mf_resp.json()
+            assert mf_j["start_url"] == f"/webapp/{tok}"
+            assert mf_j["display"] == "standalone"
+
+            sw_resp = await client.get("/sw.js")
+            assert sw_resp.status == 200
+
+            icon_resp = await client.get("/icon.svg")
+            assert icon_resp.status == 200
         finally:
             await client.close()
 

@@ -10,10 +10,14 @@
 
 import asyncio
 import datetime
+import hashlib
+import hmac
 import json
 import logging
 import os
+import re
 import secrets
+import urllib.parse
 from typing import Any, Callable
 
 from aiohttp import web
@@ -88,6 +92,49 @@ def get_user_id_by_token(token: str) -> int | None:
             (token,),
         ).fetchone()
         return int(row["user_id"]) if row else None
+
+
+def _extract_token_from_input(raw: str) -> str:
+    """Извлекает токен как из чистой строки токена, так и из полной ссылки (/webapp/<token>)."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    m = re.search(r"/(?:webapp|api/v1)/([A-Za-z0-9_\-]+)", s)
+    if m:
+        return m.group(1)
+    m_q = re.search(r"[?&]token=([A-Za-z0-9_\-]+)", s)
+    if m_q:
+        return m_q.group(1)
+    return s.split()[0].strip("`'\"/ ")
+
+
+def _verify_telegram_init_data(init_data: str) -> int | None:
+    """Проверяет подпись Telegram WebApp initData и возвращает user_id."""
+    if not init_data:
+        return None
+    bot_token = (os.environ.get("BOT_TOKEN") or "").strip()
+    try:
+        parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
+        user_json = parsed.get("user")
+        if not user_json:
+            return None
+        user_obj = json.loads(user_json)
+        uid = int(user_obj.get("id") or 0)
+        if not uid:
+            return None
+        if not bot_token:
+            return None
+        recv_hash = parsed.pop("hash", "")
+        if not recv_hash:
+            return None
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+        secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+        calc_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calc_hash, recv_hash):
+            return uid
+    except Exception:
+        return None
+    return None
 
 
 # --- Сбор данных для API ---
@@ -662,23 +709,162 @@ async def handle_get_kwgt(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html")
 
 
+async def handle_auth_login(request: web.Request) -> web.Response:
+    """Однократная авторизация по токену, персональной ссылке или Telegram initData.
+    Устанавливает долгоживущую cookie (на 1 год) и возвращает токен для localStorage.
+    """
+    raw_token = ""
+    init_data = ""
+    try:
+        if request.content_type == "application/json":
+            body = await request.json()
+            raw_token = body.get("token") or ""
+            init_data = body.get("init_data") or ""
+        else:
+            post_data = await request.post()
+            raw_token = post_data.get("token") or ""
+            init_data = post_data.get("init_data") or ""
+    except Exception:
+        return web.json_response({"ok": False, "error": "Некорректный запрос"}, status=400, headers=_cors_headers())
+
+    token = _extract_token_from_input(raw_token)
+    user_id = get_user_id_by_token(token) if token else None
+
+    if not user_id and init_data:
+        tg_uid = _verify_telegram_init_data(init_data)
+        if tg_uid:
+            user_id = tg_uid
+            token = get_or_create_widget_token(user_id)
+
+    if not user_id or not token:
+        return web.json_response(
+            {"ok": False, "error": "Неверный токен доступа. Скопируйте токен или ссылку в боте (📱 Виджеты & Web App)."},
+            status=401,
+            headers=_cors_headers(),
+        )
+
+    resp = web.json_response(
+        {"ok": True, "token": token, "user_id": user_id, "summary": get_widget_summary_data(user_id)},
+        headers=_cors_headers(),
+    )
+    resp.set_cookie("kopilka_token", token, max_age=31536000, path="/", samesite="Lax")
+    return resp
+
+
+async def handle_icon_svg(request: web.Request) -> web.Response:
+    """Векторная иконка приложения для рабочего стола ПК, iOS и Android (PWA)."""
+    svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22c55e"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="115" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="168" fill="none" stroke="#334155" stroke-width="34"/>
+  <circle cx="256" cy="256" r="168" fill="none" stroke="url(#ring)" stroke-width="34" stroke-linecap="round" stroke-dasharray="820 1055" transform="rotate(-90 256 256)"/>
+  <text x="256" y="292" text-anchor="middle" fill="#f8fafc" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif" font-size="140" font-weight="800">₽</text>
+</svg>"""
+    return web.Response(
+        text=svg,
+        content_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+async def handle_manifest(request: web.Request) -> web.Response:
+    """Web App Manifest для установки приложения на рабочий стол ПК / экран «Домой» с сохранением сессии."""
+    token = (
+        request.match_info.get("token")
+        or request.query.get("token")
+        or request.cookies.get("kopilka_token")
+        or ""
+    ).strip()
+    if token and not get_user_id_by_token(token):
+        token = ""
+    start_url = f"/webapp/{token}" if token else "/app"
+    manifest = {
+        "id": start_url,
+        "name": "Копилка — Бюджет и траты",
+        "short_name": "Копилка",
+        "description": "Дневной бюджет, банк сдачи, копилка и быстрая запись расходов",
+        "start_url": start_url,
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "portrait",
+        "background_color": "#0f172a",
+        "theme_color": "#0f172a",
+        "icons": [
+            {
+                "src": "/icon.svg",
+                "sizes": "any",
+                "type": "image/svg+xml",
+                "purpose": "any maskable",
+            }
+        ],
+    }
+    return web.json_response(manifest, content_type="application/manifest+json", headers=_cors_headers())
+
+
+async def handle_service_worker(request: web.Request) -> web.Response:
+    """Service Worker для поддержки установки PWA на рабочий стол и главный экран."""
+    sw_js = """self.addEventListener('install', (event) => {
+  self.skipWaiting();
+});
+self.addEventListener('activate', (event) => {
+  event.waitUntil(self.clients.claim());
+});
+self.addEventListener('fetch', (event) => {
+  if (event.request.method !== 'GET') return;
+  event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
+});
+"""
+    return web.Response(
+        text=sw_js,
+        content_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+    )
+
+
 async def handle_webapp(request: web.Request) -> web.Response:
-    """Рендерит полноценный интерактивный Telegram Mini App (Web App)."""
-    token = request.match_info.get("token", "")
-    user_id = get_user_id_by_token(token)
-    if not user_id:
-        return web.Response(text="<h1>Неверный токен доступа</h1>", status=401, content_type="text/html")
+    """Рендерит полноценный интерактивный Telegram Mini App / PWA с однократной авторизацией."""
+    path_token = (request.match_info.get("token") or "").strip()
+    query_token = (request.query.get("token") or "").strip()
+    cookie_token = (request.cookies.get("kopilka_token") or "").strip()
+
+    # Если передан явный токен в URL /webapp/{token}, проверяем его
+    if path_token:
+        user_id = get_user_id_by_token(path_token)
+        if not user_id:
+            return web.Response(text="<h1>Неверный токен доступа</h1>", status=401, content_type="text/html")
+        active_token = path_token
+    elif query_token and get_user_id_by_token(query_token):
+        active_token = query_token
+    elif cookie_token and get_user_id_by_token(cookie_token):
+        active_token = cookie_token
+    else:
+        active_token = ""
 
     base_url = _get_base_url(request)
-    summary_url = f"{base_url}/api/v1/{token}/summary"
-    expense_url = f"{base_url}/api/v1/{token}/expense"
-    delete_url_prefix = f"{base_url}/api/v1/{token}/expense/"
+    manifest_href = f"/webapp/{active_token}/manifest.json" if active_token else "/manifest.json"
 
     html = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Копилка">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="manifest" id="manifestLink" href="{manifest_href}">
+  <link rel="icon" type="image/svg+xml" href="/icon.svg">
+  <link rel="apple-touch-icon" href="/icon.svg">
   <title>Копилка • Mini App</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
@@ -693,144 +879,548 @@ async def handle_webapp(request: web.Request) -> web.Response:
       --danger: #ef4444;
       --warning: #f59e0b;
     }}
-    * {{ box-sizing: border-box; -webkit-tap-highlight-color: transparent; }}
-    body {{
-      margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg); color: var(--text); user-select: none;
-      display: flex; justify-content: center;
+    * {{
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }}
+    html, body {{
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      user-select: none;
+      -webkit-font-smoothing: antialiased;
+    }}
+    ::-webkit-scrollbar {{
+      width: 5px;
+      height: 5px;
+    }}
+    ::-webkit-scrollbar-track {{
+      background: transparent;
+    }}
+    ::-webkit-scrollbar-thumb {{
+      background: rgba(255, 255, 255, 0.16);
+      border-radius: 999px;
     }}
     .app-container {{
-      width: 100%; max-width: 480px; margin: 0 auto;
+      width: 100%;
+      max-width: 440px;
+      margin: 0 auto;
+      padding: 14px 14px 28px;
     }}
-    .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }}
-    .title {{ font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; letter-spacing: -0.3px; }}
-    .date-badge {{ font-size: 13px; color: var(--hint); background: var(--card-bg); padding: 4px 10px; border-radius: 12px; }}
-    
+    .header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }}
+    .title {{
+      font-size: 20px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      letter-spacing: -0.3px;
+      min-width: 0;
+    }}
+    .header-right {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }}
+    .btn-install-top {{
+      background: rgba(56, 189, 248, 0.14);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 5px 10px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+      transition: 0.2s;
+    }}
+    .btn-install-top:active {{
+      transform: scale(0.97);
+    }}
+    .date-badge {{
+      font-size: 12px;
+      color: var(--hint);
+      background: var(--card-bg);
+      padding: 5px 10px;
+      border-radius: 10px;
+      white-space: nowrap;
+    }}
+
     .hero-card {{
-      background: var(--card-bg); border-radius: 20px; padding: 20px; text-align: center;
-      margin-bottom: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.15); position: relative; overflow: hidden;
+      background: var(--card-bg);
+      border-radius: 20px;
+      padding: 18px 16px;
+      text-align: center;
+      margin-bottom: 12px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+      position: relative;
+      overflow: hidden;
     }}
     .progress-circle {{
-      position: relative; width: 140px; height: 140px; margin: 0 auto 12px;
+      position: relative;
+      width: 152px;
+      height: 152px;
+      margin: 0 auto 10px;
     }}
-    .progress-circle svg {{ transform: rotate(-90deg); width: 140px; height: 140px; }}
+    .progress-circle svg {{
+      transform: rotate(-90deg);
+      width: 152px;
+      height: 152px;
+      display: block;
+    }}
     .progress-circle circle {{
-      fill: none; stroke-width: 10; stroke-linecap: round;
+      fill: none;
+      stroke-width: 10;
+      stroke-linecap: round;
     }}
-    .circle-bg {{ stroke: rgba(255,255,255,0.08); }}
+    .circle-bg {{
+      stroke: rgba(255, 255, 255, 0.08);
+    }}
     .circle-val {{
-      stroke: var(--success); stroke-dasharray: 377; stroke-dashoffset: 377;
+      stroke: var(--success);
+      stroke-dasharray: 402;
+      stroke-dashoffset: 402;
       transition: stroke-dashoffset 0.6s ease, stroke 0.3s;
     }}
     .circle-text {{
-      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      width: 122px;
     }}
-    .circle-sum {{ font-size: 22px; font-weight: 800; line-height: 1.1; }}
-    .circle-sub {{ font-size: 11px; color: var(--hint); margin-top: 2px; }}
+    .circle-sum {{
+      font-size: 22px;
+      font-weight: 800;
+      line-height: 1.15;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .circle-sub {{
+      font-size: 11px;
+      color: var(--hint);
+      margin-top: 3px;
+      white-space: nowrap;
+    }}
 
-    .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }}
-    .card {{
-      background: var(--card-bg); border-radius: 16px; padding: 14px; display: flex; flex-direction: column;
+    .grid {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 10px;
+      margin-bottom: 12px;
     }}
-    .card-label {{ font-size: 11px; color: var(--hint); margin-bottom: 4px; }}
-    .card-value {{ font-size: 17px; font-weight: 700; }}
-    .card-sub {{ font-size: 10px; color: var(--hint); margin-top: 2px; }}
+    .card {{
+      background: var(--card-bg);
+      border-radius: 16px;
+      padding: 13px 14px;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }}
+    .card-label {{
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--hint);
+      margin-bottom: 4px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .card-value {{
+      font-size: 17px;
+      font-weight: 800;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .card-sub {{
+      font-size: 11px;
+      color: var(--hint);
+      margin-top: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
 
     .add-box {{
-      background: var(--card-bg); border-radius: 18px; padding: 16px; margin-bottom: 16px;
+      background: var(--card-bg);
+      border-radius: 18px;
+      padding: 15px;
+      margin-bottom: 12px;
     }}
-    .box-title {{ font-size: 14px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }}
-    .input-row {{ display: flex; gap: 8px; margin-bottom: 10px; }}
-    input[type="number"], input[type="text"] {{
-      flex: 1; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px;
-      padding: 12px; color: var(--text); font-size: 16px; outline: none;
+    .box-title {{
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
     }}
-    input:focus {{ border-color: var(--accent); }}
-    .chips {{ display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }}
+    .input-row {{
+      display: grid;
+      grid-template-columns: 112px minmax(0, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+      width: 100%;
+    }}
+    .input-row input, .login-input {{
+      width: 100%;
+      min-width: 0;
+      background: rgba(0, 0, 0, 0.26);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      padding: 11px 12px;
+      color: var(--text);
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.2s;
+      -moz-appearance: textfield;
+    }}
+    .input-row input::-webkit-outer-spin-button,
+    .input-row input::-webkit-inner-spin-button {{
+      -webkit-appearance: none;
+      margin: 0;
+    }}
+    .input-row input:focus, .login-input:focus {{
+      border-color: var(--accent);
+    }}
+    .chips {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }}
     .chip {{
-      background: rgba(255,255,255,0.06); border: 1px solid transparent; border-radius: 10px;
-      padding: 6px 10px; font-size: 12px; cursor: pointer; transition: 0.2s;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: 0.18s;
+      white-space: nowrap;
     }}
-    .chip.active {{ background: var(--accent); color: var(--btn-text); font-weight: 600; }}
+    .chip.active {{
+      background: var(--accent);
+      color: var(--btn-text);
+      border-color: transparent;
+      font-weight: 600;
+    }}
     .btn-submit {{
-      width: 100%; background: var(--accent); color: var(--btn-text); border: none; border-radius: 12px;
-      padding: 13px; font-size: 15px; font-weight: 700; cursor: pointer; transition: opacity 0.2s;
+      width: 100%;
+      background: var(--accent);
+      color: var(--btn-text);
+      border: none;
+      border-radius: 12px;
+      padding: 12px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
     }}
-    .btn-submit:active {{ opacity: 0.8; }}
+    .btn-submit:active {{
+      opacity: 0.85;
+      transform: scale(0.99);
+    }}
+    .btn-secondary {{
+      width: 100%;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      padding: 11px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+      text-align: center;
+      display: block;
+      text-decoration: none;
+    }}
 
-    .expenses-list {{ background: var(--card-bg); border-radius: 18px; padding: 16px; }}
-    .exp-item {{
-      display: flex; justify-content: space-between; align-items: center; padding: 8px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 14px;
+    .expenses-list {{
+      background: var(--card-bg);
+      border-radius: 18px;
+      padding: 15px;
     }}
-    .exp-item:last-child {{ border-bottom: none; }}
-    .exp-del {{ color: var(--danger); cursor: pointer; padding: 4px 8px; opacity: 0.7; font-weight: bold; }}
+    .exp-item {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 14px;
+    }}
+    .exp-item:last-child {{
+      border-bottom: none;
+    }}
+    .exp-info {{
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .exp-del {{
+      color: var(--danger);
+      cursor: pointer;
+      padding: 4px 8px;
+      opacity: 0.8;
+      font-weight: bold;
+      flex-shrink: 0;
+    }}
+
+    /* Экран однократного входа (если открыто на новом устройстве без токена) */
+    .auth-card {{
+      background: var(--card-bg);
+      border-radius: 20px;
+      padding: 22px 18px;
+      margin-top: 16px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
+    }}
+    .auth-title {{
+      font-size: 18px;
+      font-weight: 800;
+      margin-bottom: 8px;
+    }}
+    .auth-desc {{
+      font-size: 13px;
+      color: var(--hint);
+      line-height: 1.45;
+      margin-bottom: 14px;
+    }}
+    .auth-err {{
+      color: var(--danger);
+      font-size: 12px;
+      margin-top: 8px;
+      display: none;
+    }}
+
+    /* Модальное окно установки на рабочий стол / экран Домой */
+    .modal-backdrop {{
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 100;
+    }}
+    .modal-backdrop.open {{
+      display: flex;
+    }}
+    .modal-card {{
+      width: 100%;
+      max-width: 390px;
+      background: var(--card-bg);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      padding: 18px;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+    }}
+    .modal-title {{
+      font-size: 17px;
+      font-weight: 800;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }}
+    .modal-close {{
+      cursor: pointer;
+      color: var(--hint);
+      font-size: 18px;
+      padding: 2px 6px;
+    }}
+    .modal-step {{
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.45;
+      background: rgba(0, 0, 0, 0.22);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+    }}
   </style>
 </head>
 <body>
   <div class="app-container">
     <div class="header">
       <div class="title">Копилка</div>
-      <div class="date-badge" id="dateBadge">Загрузка...</div>
-    </div>
-
-  <div class="hero-card">
-    <div class="progress-circle">
-      <svg>
-        <circle class="circle-bg" cx="70" cy="70" r="60"></circle>
-        <circle class="circle-val" id="circleProgress" cx="70" cy="70" r="60"></circle>
-      </svg>
-      <div class="circle-text">
-        <div class="circle-sum" id="remSum">...</div>
-        <div class="circle-sub">остаток на день</div>
+      <div class="header-right">
+        <button class="btn-install-top" id="btnInstallTop" title="Добавить на рабочий стол / главный экран">📲 На экран</button>
+        <div class="date-badge" id="dateBadge">...</div>
       </div>
     </div>
-    <div style="font-size: 13px; color: var(--hint);" id="limitSubtitle">Лимит: ...</div>
-  </div>
 
-  <div class="grid">
-    <div class="card">
-      <div class="card-label">🪙 БАНК СДАЧИ</div>
-      <div class="card-value" id="poolVal">...</div>
-      <div class="card-sub">накоплено экономией</div>
-    </div>
-    <div class="card">
-      <div class="card-label">🏦 КОПИЛКА</div>
-      <div class="card-value" id="piggyVal">...</div>
-      <div class="card-sub" id="goalSub">баланс копилки</div>
-    </div>
-  </div>
-
-  <div class="add-box">
-    <div class="box-title">⚡️ Быстрая запись расхода</div>
-    <div class="input-row">
-      <input type="number" id="inpAmount" placeholder="Сумма (₽)" inputmode="decimal">
-      <input type="text" id="inpNote" placeholder="Магазин / Товар">
-    </div>
-    <div class="chips" id="chipsBox">
-      <div class="chip active" data-cat="Продукты">🛒 Продукты</div>
-      <div class="chip" data-cat="Кафе и рестораны">☕️ Кафе</div>
-      <div class="chip" data-cat="Транспорт">🚕 Транспорт</div>
-      <div class="chip" data-cat="Покупки">🛍 Покупки</div>
-      <div class="chip" data-cat="Здоровье">💊 Аптека</div>
-      <div class="chip" data-cat="Разное">⚪️ Разное</div>
-    </div>
-    <button class="btn-submit" id="btnSubmit">Записать расход</button>
-  </div>
-
-    <div class="expenses-list">
-      <div class="box-title">🧾 Сегодняшние траты</div>
-      <div id="expensesBox">
-        <div style="color: var(--hint); font-size: 13px; text-align: center; padding: 12px;">Загрузка...</div>
+    <!-- Блок однократной авторизации (показывается только если токен ещё не сохранён на устройстве) -->
+    <div id="authView" style="display: none;">
+      <div class="auth-card">
+        <div class="auth-title">🔐 Вход в Копилку (1 раз)</div>
+        <div class="auth-desc">
+          Введите ваш токен доступа или персональную ссылку из бота (раздел <b>«📱 Виджеты &amp; Web App»</b>).<br><br>
+          Устройство запомнит вас автоматически — при запуске с рабочего стола вводить ничего повторно не придётся.
+        </div>
+        <input type="text" id="inpAuthToken" class="login-input" placeholder="Вставьте токен или ссылку..." autocomplete="off">
+        <div class="auth-err" id="authError"></div>
+        <button class="btn-submit" id="btnLogin" style="margin-top: 12px;">Войти и запомнить устройство</button>
       </div>
+    </div>
+
+    <!-- Основной дашборд -->
+    <div id="dashboardView" style="display: none;">
+      <div class="hero-card">
+        <div class="progress-circle">
+          <svg viewBox="0 0 152 152">
+            <circle class="circle-bg" cx="76" cy="76" r="64"></circle>
+            <circle class="circle-val" id="circleProgress" cx="76" cy="76" r="64"></circle>
+          </svg>
+          <div class="circle-text">
+            <div class="circle-sum" id="remSum">...</div>
+            <div class="circle-sub">остаток на день</div>
+          </div>
+        </div>
+        <div style="font-size: 13px; color: var(--hint);" id="limitSubtitle">Лимит: ...</div>
+      </div>
+
+      <div class="grid">
+        <div class="card">
+          <div class="card-label">🪙 БАНК СДАЧИ</div>
+          <div class="card-value" id="poolVal">...</div>
+          <div class="card-sub" id="poolSub">накоплено экономией</div>
+        </div>
+        <div class="card">
+          <div class="card-label">🏦 КОПИЛКА</div>
+          <div class="card-value" id="piggyVal">...</div>
+          <div class="card-sub" id="goalSub">баланс копилки</div>
+        </div>
+      </div>
+
+      <div class="add-box">
+        <div class="box-title">
+          <span>⚡️ Быстрая запись расхода</span>
+        </div>
+        <div class="input-row">
+          <input type="number" id="inpAmount" placeholder="Сумма (₽)" inputmode="decimal">
+          <input type="text" id="inpNote" placeholder="Магазин / Товар">
+        </div>
+        <div class="chips" id="chipsBox">
+          <div class="chip active" data-cat="Продукты">🛒 Продукты</div>
+          <div class="chip" data-cat="Кафе и рестораны">☕️ Кафе</div>
+          <div class="chip" data-cat="Транспорт">🚕 Транспорт</div>
+          <div class="chip" data-cat="Дом">🏠 Дом</div>
+          <div class="chip" data-cat="Покупки">🛍 Покупки</div>
+          <div class="chip" data-cat="Здоровье">💊 Аптека</div>
+          <div class="chip" data-cat="Разное">⚪️ Разное</div>
+        </div>
+        <button class="btn-submit" id="btnSubmit">Записать расход</button>
+      </div>
+
+      <div class="expenses-list">
+        <div class="box-title">🧾 Сегодняшние траты</div>
+        <div id="expensesBox">
+          <div style="color: var(--hint); font-size: 13px; text-align: center; padding: 12px;">Загрузка...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модальное окно установки на рабочий стол / главный экран -->
+  <div class="modal-backdrop" id="installModal">
+    <div class="modal-card">
+      <div class="modal-title">
+        <span>📲 Добавить на рабочий стол</span>
+        <span class="modal-close" id="btnCloseModal">✕</span>
+      </div>
+      <div style="font-size: 12px; color: var(--success); margin-bottom: 10px; font-weight: 600;">
+        ✅ Авторизация уже вшита — входить заново не нужно!
+      </div>
+
+      <button class="btn-submit" id="btnNativePwaInstall" style="display: none; margin-bottom: 10px;">
+        💻 Установить приложение в 1 клик
+      </button>
+
+      <button class="btn-submit" id="btnTgHomeScreen" style="display: none; margin-bottom: 10px;">
+        📱 Добавить ярлык на экран (Telegram)
+      </button>
+
+      <button class="btn-secondary" id="btnOpenInBrowser" style="display: none; margin-top: 0; margin-bottom: 10px;">
+        🌐 Открыть в браузере (для установки на ПК / телефон)
+      </button>
+
+      <div class="modal-step">
+        <b>💻 На компьютере (Chrome / Edge / Яндекс):</b><br>
+        Нажмите значок <b>«Установить Копилка»</b> (⊕ справа в адресной строке браузера) или меню <b>⋮ → «Сохранить и поделиться» → «Установить как приложение»</b>.
+      </div>
+      <div class="modal-step">
+        <b>🍏 На iPhone (Safari):</b><br>
+        Нажмите кнопку <b>«Поделиться»</b> (квадрат со стрелкой вверх) → <b>«На экран "Домой"»</b>.
+      </div>
+      <div class="modal-step">
+        <b>🤖 На Android (Chrome):</b><br>
+        Нажмите меню <b>⋮ → «Добавить на главный экран»</b> (или «Установить приложение»).
+      </div>
+
+      <button class="btn-secondary" id="btnCopyDirectLink">📋 Скопировать личную ссылку со входом</button>
     </div>
   </div>
 
   <script>
+    const BASE_URL = "{base_url}";
+    const SERVER_TOKEN = "{active_token}";
     const tg = window.Telegram ? window.Telegram.WebApp : null;
     if (tg) {{
       tg.ready();
       tg.expand();
+    }}
+
+    if ("serviceWorker" in navigator) {{
+      navigator.serviceWorker.register("/sw.js").catch(() => {{}});
+    }}
+
+    let currentToken = SERVER_TOKEN || localStorage.getItem("kopilka_token") || "";
+    let deferredInstallPrompt = null;
+
+    window.addEventListener("beforeinstallprompt", (e) => {{
+      e.preventDefault();
+      deferredInstallPrompt = e;
+      const btnNative = document.getElementById("btnNativePwaInstall");
+      if (btnNative) btnNative.style.display = "block";
+    }});
+
+    function saveTokenPersistently(tok) {{
+      if (!tok) return;
+      currentToken = tok;
+      try {{
+        localStorage.setItem("kopilka_token", tok);
+      }} catch (e) {{}}
+      document.cookie = `kopilka_token=${{encodeURIComponent(tok)}}; path=/; max-age=31536000; SameSite=Lax`;
+      const mf = document.getElementById("manifestLink");
+      if (mf) mf.href = `/webapp/${{encodeURIComponent(tok)}}/manifest.json`;
+    }}
+
+    if (SERVER_TOKEN) {{
+      saveTokenPersistently(SERVER_TOKEN);
     }}
 
     let selectedCat = "Продукты";
@@ -843,65 +1433,151 @@ async def handle_webapp(request: web.Request) -> web.Response:
       }});
     }});
 
+    function renderSummary(data) {{
+      document.getElementById("authView").style.display = "none";
+      document.getElementById("dashboardView").style.display = "block";
+
+      document.getElementById("dateBadge").innerText = data.date_fmt;
+      document.getElementById("remSum").innerText = data.daily_remaining_fmt;
+      document.getElementById("limitSubtitle").innerText = `Потрачено ${{data.daily_spent_fmt}} из ${{data.daily_limit_fmt}} (${{data.spent_percent}}%)`;
+
+      const poolEl = document.getElementById("poolVal");
+      const poolSubEl = document.getElementById("poolSub");
+      poolEl.innerText = data.change_pool_fmt;
+      if (data.change_pool >= 0) {{
+        poolEl.style.color = "var(--success)";
+        poolSubEl.innerText = "накоплено экономией";
+      }} else {{
+        poolEl.style.color = "var(--danger)";
+        poolSubEl.innerText = "перерасход за месяц";
+      }}
+
+      document.getElementById("piggyVal").innerText = data.piggy_balance_fmt;
+      if (data.goal) {{
+        document.getElementById("goalSub").innerText = `Цель: ${{data.goal.title}} (${{data.goal.percent}}%)`;
+      }} else {{
+        document.getElementById("goalSub").innerText = "баланс копилки";
+      }}
+
+      // Анимация круга (r=64 -> 2*pi*64 = 402.12)
+      const circle = document.getElementById("circleProgress");
+      const totalLen = 2 * Math.PI * 64;
+      const pct = Math.min(100, Math.max(0, data.spent_percent));
+      const offset = totalLen - (pct / 100) * totalLen;
+      circle.style.strokeDashoffset = offset;
+      if (pct >= 100 || data.daily_spent > data.daily_limit) {{
+        circle.style.stroke = "var(--danger)";
+      }} else if (pct >= 80) {{
+        circle.style.stroke = "var(--warning)";
+      }} else {{
+        circle.style.stroke = "var(--success)";
+      }}
+
+      const box = document.getElementById("expensesBox");
+      if (!data.recent_expenses || data.recent_expenses.length === 0) {{
+        box.innerHTML = `<div style="color: var(--hint); font-size: 13px; text-align: center; padding: 8px;">Сегодня пока нет трат</div>`;
+      }} else {{
+        box.innerHTML = data.recent_expenses.map(e => `
+          <div class="exp-item">
+            <div class="exp-info"><b>${{e.amount_fmt}}</b> <span style="color: var(--hint);">• ${{e.category}}</span></div>
+            <div class="exp-del" onclick="deleteExpense(${{e.id}})">✕</div>
+          </div>
+        `).join("");
+      }}
+    }}
+
     async function loadData() {{
+      if (!currentToken) {{
+        // Попробуем бесшовный вход через Telegram initData, если открыто внутри Telegram
+        if (tg && tg.initData) {{
+          try {{
+            const authRes = await fetch(`${{BASE_URL}}/api/v1/auth/login`, {{
+              method: "POST",
+              headers: {{ "Content-Type": "application/json" }},
+              body: JSON.stringify({{ init_data: tg.initData }})
+            }});
+            const authData = await authRes.json();
+            if (authData.ok && authData.token) {{
+              saveTokenPersistently(authData.token);
+              if (authData.summary) {{
+                renderSummary(authData.summary);
+                return;
+              }}
+            }}
+          }} catch (e) {{}}
+        }}
+        document.getElementById("dashboardView").style.display = "none";
+        document.getElementById("authView").style.display = "block";
+        document.getElementById("dateBadge").innerText = "Вход";
+        return;
+      }}
+
       try {{
-        const res = await fetch("{summary_url}");
+        const res = await fetch(`${{BASE_URL}}/api/v1/${{encodeURIComponent(currentToken)}}/summary`);
+        if (res.status === 401) {{
+          localStorage.removeItem("kopilka_token");
+          currentToken = "";
+          document.getElementById("dashboardView").style.display = "none";
+          document.getElementById("authView").style.display = "block";
+          return;
+        }}
         const data = await res.json();
         if (!data.ok) return;
-
-        document.getElementById("dateBadge").innerText = data.date_fmt;
-        document.getElementById("remSum").innerText = data.daily_remaining_fmt;
-        document.getElementById("limitSubtitle").innerText = `Потрачено ${{data.daily_spent_fmt}} из ${{data.daily_limit_fmt}} (${{data.spent_percent}}%)`;
-
-        document.getElementById("poolVal").innerText = data.change_pool_fmt;
-        document.getElementById("poolVal").style.color = data.change_pool >= 0 ? "var(--success)" : "var(--danger)";
-
-        document.getElementById("piggyVal").innerText = data.piggy_balance_fmt;
-        if (data.goal) {{
-          document.getElementById("goalSub").innerText = `Цель: ${{data.goal.title}} (${{data.goal.percent}}%)`;
-        }}
-
-        // Анимация круга
-        const circle = document.getElementById("circleProgress");
-        const totalLen = 2 * Math.PI * 60; // 377
-        const pct = Math.min(100, Math.max(0, data.spent_percent));
-        const offset = totalLen - (pct / 100) * totalLen;
-        circle.style.strokeDashoffset = offset;
-        if (pct >= 100) {{
-          circle.style.stroke = "var(--danger)";
-        }} else if (pct >= 80) {{
-          circle.style.stroke = "var(--warning)";
-        }} else {{
-          circle.style.stroke = "var(--success)";
-        }}
-
-        // Список трат
-        const box = document.getElementById("expensesBox");
-        if (!data.recent_expenses || data.recent_expenses.length === 0) {{
-          box.innerHTML = `<div style="color: var(--hint); font-size: 13px; text-align: center; padding: 8px;">Сегодня пока нет трат</div>`;
-        }} else {{
-          box.innerHTML = data.recent_expenses.map(e => `
-            <div class="exp-item">
-              <div><b>${{e.amount_fmt}}</b> <span style="color: var(--hint);">• ${{e.category}}</span></div>
-              <div class="exp-del" onclick="deleteExpense(${{e.id}})">✕</div>
-            </div>
-          `).join("");
-        }}
+        saveTokenPersistently(currentToken);
+        renderSummary(data);
       }} catch (err) {{
         console.error(err);
       }}
     }}
 
+    document.getElementById("btnLogin").addEventListener("click", async () => {{
+      const val = document.getElementById("inpAuthToken").value.trim();
+      const errEl = document.getElementById("authError");
+      errEl.style.display = "none";
+      if (!val) {{
+        errEl.innerText = "Вставьте токен или ссылку из бота";
+        errEl.style.display = "block";
+        return;
+      }}
+      try {{
+        const res = await fetch(`${{BASE_URL}}/api/v1/auth/login`, {{
+          method: "POST",
+          headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ token: val }})
+        }});
+        const data = await res.json();
+        if (!data.ok) {{
+          errEl.innerText = data.error || "Неверный токен";
+          errEl.style.display = "block";
+          return;
+        }}
+        saveTokenPersistently(data.token);
+        if (window.history && window.history.replaceState) {{
+          window.history.replaceState({{}}, "", `/webapp/${{encodeURIComponent(data.token)}}`);
+        }}
+        if (data.summary) {{
+          renderSummary(data.summary);
+        }} else {{
+          await loadData();
+        }}
+      }} catch (e) {{
+        errEl.innerText = "Ошибка соединения с сервером";
+        errEl.style.display = "block";
+      }}
+    }});
+
     async function deleteExpense(id) {{
+      if (!currentToken) return;
       if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("medium");
-      await fetch("{delete_url_prefix}" + id, {{ method: "POST" }});
+      await fetch(`${{BASE_URL}}/api/v1/${{encodeURIComponent(currentToken)}}/expense/` + id, {{ method: "POST" }});
       loadData();
     }}
 
-    document.getElementById("btnSubmit").addEventListener("click", async () => {{
+    async function submitExpense() {{
+      if (!currentToken) return;
       const amtInput = document.getElementById("inpAmount");
       const noteInput = document.getElementById("inpNote");
-      const amount = parseFloat(amtInput.value);
+      const amount = parseFloat((amtInput.value || "").replace(",", "."));
       if (!amount || amount <= 0) {{
         alert("Введите сумму расхода");
         return;
@@ -915,11 +1591,12 @@ async def handle_webapp(request: web.Request) -> web.Response:
 
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
 
-      document.getElementById("btnSubmit").disabled = true;
-      document.getElementById("btnSubmit").innerText = "Записываю...";
+      const btn = document.getElementById("btnSubmit");
+      btn.disabled = true;
+      btn.innerText = "Записываю...";
 
       try {{
-        await fetch("{expense_url}", {{
+        await fetch(`${{BASE_URL}}/api/v1/${{encodeURIComponent(currentToken)}}/expense`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
           body: JSON.stringify({{ amount: amount, category: category }})
@@ -930,17 +1607,102 @@ async def handle_webapp(request: web.Request) -> web.Response:
       }} catch (e) {{
         alert("Ошибка записи");
       }} finally {{
-        document.getElementById("btnSubmit").disabled = false;
-        document.getElementById("btnSubmit").innerText = "Записать расход";
+        btn.disabled = false;
+        btn.innerText = "Записать расход";
+      }}
+    }}
+
+    document.getElementById("btnSubmit").addEventListener("click", submitExpense);
+    document.getElementById("inpAmount").addEventListener("keydown", (e) => {{
+      if (e.key === "Enter") submitExpense();
+    }});
+    document.getElementById("inpNote").addEventListener("keydown", (e) => {{
+      if (e.key === "Enter") submitExpense();
+    }});
+
+    // Модальное окно установки на рабочий стол / главный экран
+    const installModal = document.getElementById("installModal");
+    const btnInstallTop = document.getElementById("btnInstallTop");
+    const btnCloseModal = document.getElementById("btnCloseModal");
+    const btnNativePwaInstall = document.getElementById("btnNativePwaInstall");
+    const btnTgHomeScreen = document.getElementById("btnTgHomeScreen");
+    const btnOpenInBrowser = document.getElementById("btnOpenInBrowser");
+    const btnCopyDirectLink = document.getElementById("btnCopyDirectLink");
+
+    if (tg && typeof tg.addToHomeScreen === "function") {{
+      btnTgHomeScreen.style.display = "block";
+      btnTgHomeScreen.addEventListener("click", () => {{
+        try {{ tg.addToHomeScreen(); }} catch (e) {{}}
+      }});
+    }}
+
+    if (tg && tg.initData) {{
+      btnOpenInBrowser.style.display = "block";
+      btnOpenInBrowser.addEventListener("click", () => {{
+        const targetUrl = currentToken
+          ? `${{BASE_URL}}/webapp/${{encodeURIComponent(currentToken)}}?install=1`
+          : `${{BASE_URL}}/app?install=1`;
+        if (typeof tg.openLink === "function") {{
+          tg.openLink(targetUrl);
+        }} else {{
+          window.open(targetUrl, "_blank");
+        }}
+      }});
+    }}
+
+    btnNativePwaInstall.addEventListener("click", async () => {{
+      if (!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      await deferredInstallPrompt.userChoice;
+      deferredInstallPrompt = null;
+      btnNativePwaInstall.style.display = "none";
+      installModal.classList.remove("open");
+    }});
+
+    btnInstallTop.addEventListener("click", async () => {{
+      if (deferredInstallPrompt) {{
+        deferredInstallPrompt.prompt();
+        await deferredInstallPrompt.userChoice;
+        deferredInstallPrompt = null;
+        btnNativePwaInstall.style.display = "none";
+        return;
+      }}
+      installModal.classList.add("open");
+    }});
+
+    btnCloseModal.addEventListener("click", () => {{
+      installModal.classList.remove("open");
+    }});
+    installModal.addEventListener("click", (e) => {{
+      if (e.target === installModal) installModal.classList.remove("open");
+    }});
+
+    btnCopyDirectLink.addEventListener("click", async () => {{
+      const link = currentToken
+        ? `${{BASE_URL}}/webapp/${{encodeURIComponent(currentToken)}}`
+        : `${{BASE_URL}}/app`;
+      try {{
+        await navigator.clipboard.writeText(link);
+        btnCopyDirectLink.innerText = "✅ Ссылка скопирована!";
+        setTimeout(() => {{ btnCopyDirectLink.innerText = "📋 Скопировать личную ссылку со входом"; }}, 2000);
+      }} catch (e) {{
+        prompt("Скопируйте вашу персональную ссылку для быстрого входа:", link);
       }}
     }});
+
+    if (new URLSearchParams(window.location.search).get("install") === "1") {{
+      installModal.classList.add("open");
+    }}
 
     loadData();
   </script>
 </body>
 </html>
 """
-    return web.Response(text=html, content_type="text/html")
+    resp = web.Response(text=html, content_type="text/html")
+    if active_token:
+        resp.set_cookie("kopilka_token", active_token, max_age=31536000, path="/", samesite="Lax")
+    return resp
 
 
 # --- Серверное приложение aiohttp ---
@@ -952,13 +1714,20 @@ def create_widget_app() -> web.Application:
     app.router.add_options("/{tail:.*}", handle_options)
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/icon.svg", handle_icon_svg)
+    app.router.add_get("/sw.js", handle_service_worker)
+    app.router.add_get("/manifest.json", handle_manifest)
+    app.router.add_post("/api/v1/auth/login", handle_auth_login)
     app.router.add_get("/api/v1/{token}/summary", handle_get_summary)
     app.router.add_post("/api/v1/{token}/expense", handle_post_expense)
     app.router.add_post("/api/v1/{token}/expense/{exp_id}", handle_delete_expense)
     app.router.add_get("/api/v1/{token}/scriptable", handle_get_scriptable)
     app.router.add_get("/api/v1/{token}/shortcuts", handle_get_shortcuts)
     app.router.add_get("/api/v1/{token}/kwgt", handle_get_kwgt)
+    app.router.add_get("/app", handle_webapp)
+    app.router.add_get("/webapp", handle_webapp)
     app.router.add_get("/webapp/{token}", handle_webapp)
+    app.router.add_get("/webapp/{token}/manifest.json", handle_manifest)
     return app
 
 

@@ -2017,12 +2017,15 @@ async def show_app_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     token = get_or_create_widget_token(user_id)
     base_url = (os.environ.get("WIDGET_API_BASE_URL") or "https://bot-1793275701-1092-jeyzi008.bothost.tech").rstrip("/")
     webapp_url = f"{base_url}/webapp/{token}"
-    markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📱 Открыть Web App", web_app=WebAppInfo(url=webapp_url))
-    ]])
+    install_url = f"{webapp_url}?install=1"
+    markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📱 Открыть Web App (в Telegram)", web_app=WebAppInfo(url=webapp_url))],
+        [InlineKeyboardButton("💻 Установить на рабочий стол (вход 1 раз)", url=install_url)],
+    ])
     await _msg(update).reply_text(
         "📱 *Интерактивный Web App «Копилка»*\n\n"
-        "Нажмите кнопку ниже, чтобы открыть дашборд трат, баланс и банк сдачи прямо в Telegram:",
+        "• Нажмите *«📱 Открыть Web App»*, чтобы открыть дашборд прямо в Telegram.\n"
+        "• Нажмите *«💻 Установить на рабочий стол»*, чтобы открыть приложение в браузере и закрепить его на рабочем столе ПК или экране телефона (авторизация сохраняется навсегда при первом открытии).",
         parse_mode="Markdown",
         reply_markup=markup,
     )
@@ -2039,24 +2042,26 @@ async def show_widgets_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     shortcuts_url = f"{base_url}/api/v1/{token}/shortcuts"
     kwgt_url = f"{base_url}/api/v1/{token}/kwgt"
     webapp_url = f"{base_url}/webapp/{token}"
+    install_url = f"{webapp_url}?install=1"
 
     text = (
         "📱 *Виджеты на экран и Telegram Web App*\n\n"
-        "Смотрите дневной остаток и записывайте расходы прямо с рабочего стола телефона без открытия Telegram!\n\n"
+        "Смотрите дневной остаток и записывайте расходы прямо с рабочего стола телефона или компьютера!\n\n"
+        "💻 *Приложение на рабочий стол (ПК / iOS / Android):*\n"
+        "• Нажмите *«📲 На рабочий стол (вход 1 раз)»* — приложение запомнит вас при первом открытии и добавится как отдельная иконка на рабочий стол или экран «Домой».\n\n"
         "🍏 *Для iPhone / iPad (iOS):*\n"
         "• *Scriptable* — нативный виджет с кругом остатка, банком сдачи и копилкой на экран «Домой» и экран блокировки.\n"
         "• *Apple Shortcuts (Команды Siri)* — мгновенная запись расхода в 1 клик с экрана «Домой» или кнопки Action.\n\n"
         "🤖 *Для Android:*\n"
         "• *KWGT* — виджет с прогрессом и остатком дня.\n"
-        "• *MacroDroid / Tasker* — авто-запись расходов из банковских пушей (Сбер, Т-Банк, ВТБ) без вашего участия!\n"
-        "• *Ярлык чата* — вынесите бота на главный экран (меню ⋮ → «Добавить на главный экран»).\n\n"
-        "🌐 *Telegram Mini App:* интерактивный дашборд прямо внутри Telegram!\n\n"
+        "• *MacroDroid / Tasker* — авто-запись расходов из банковских пушей (Сбер, Т-Банк, ВТБ) без вашего участия!\n\n"
         f"🔑 _Ваш секретный токен доступа:_ `{token}`"
     )
 
     rows = []
     if not base_url.startswith("http://localhost") and not base_url.startswith("http://127.0.0.1"):
-        rows.append([InlineKeyboardButton("📱 Открыть Web App", web_app=WebAppInfo(url=webapp_url))])
+        rows.append([InlineKeyboardButton("📱 Открыть Web App (в Telegram)", web_app=WebAppInfo(url=webapp_url))])
+        rows.append([InlineKeyboardButton("📲 На рабочий стол (вход 1 раз)", url=install_url)])
     else:
         rows.append([InlineKeyboardButton("🌐 Открыть Web App в браузере", url=webapp_url)])
 
