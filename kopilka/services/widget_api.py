@@ -698,9 +698,13 @@ async def handle_webapp(request: web.Request) -> web.Response:
     body {{
       margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: var(--bg); color: var(--text); user-select: none;
+      display: flex; justify-content: center;
+    }}
+    .app-container {{
+      width: 100%; max-width: 480px; margin: 0 auto;
     }}
     .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }}
-    .title {{ font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; }}
+    .title {{ font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; letter-spacing: -0.3px; }}
     .date-badge {{ font-size: 13px; color: var(--hint); background: var(--card-bg); padding: 4px 10px; border-radius: 12px; }}
     
     .hero-card {{
@@ -765,10 +769,11 @@ async def handle_webapp(request: web.Request) -> web.Response:
   </style>
 </head>
 <body>
-  <div class="header">
-    <div class="title">🐷 Копилка</div>
-    <div class="date-badge" id="dateBadge">Загрузка...</div>
-  </div>
+  <div class="app-container">
+    <div class="header">
+      <div class="title">Копилка</div>
+      <div class="date-badge" id="dateBadge">Загрузка...</div>
+    </div>
 
   <div class="hero-card">
     <div class="progress-circle">
@@ -814,10 +819,11 @@ async def handle_webapp(request: web.Request) -> web.Response:
     <button class="btn-submit" id="btnSubmit">Записать расход</button>
   </div>
 
-  <div class="expenses-list">
-    <div class="box-title">🧾 Сегодняшние траты</div>
-    <div id="expensesBox">
-      <div style="color: var(--hint); font-size: 13px; text-align: center; padding: 12px;">Загрузка...</div>
+    <div class="expenses-list">
+      <div class="box-title">🧾 Сегодняшние траты</div>
+      <div id="expensesBox">
+        <div style="color: var(--hint); font-size: 13px; text-align: center; padding: 12px;">Загрузка...</div>
+      </div>
     </div>
   </div>
 

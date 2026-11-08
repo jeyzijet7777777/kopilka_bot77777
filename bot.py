@@ -1921,6 +1921,26 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_start_day(user_id)
     if get_setting(user_id, "blocked") == "1":
         set_setting(user_id, "blocked", "0")
+
+    # Если пользователь уже настроил доход, приветствуем и сразу выводим главное меню:
+    has_income = get_setting(user_id, "daily_income") is not None
+    if has_income:
+        context.user_data.clear()
+        today_nav = [
+            [
+                InlineKeyboardButton("🔄 Обновить", callback_data="today_refresh"),
+                InlineKeyboardButton("📈 График", callback_data="chart_overview"),
+                InlineKeyboardButton("🏠 Счета", callback_data="bills_refresh"),
+            ]
+        ]
+        text, markup = build_day_report(user_id, today_date(), extra_rows=today_nav)
+        await update.message.reply_text(
+            "👋 *С возвращением!*\n\n" + text,
+            parse_mode="Markdown",
+            reply_markup=MAIN_KB,
+        )
+        return
+
     context.user_data.clear()
     context.user_data["wizard_step"] = "wizard_mode"
     welcome = (
