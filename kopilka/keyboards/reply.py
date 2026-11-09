@@ -3,7 +3,7 @@ from telegram import ReplyKeyboardMarkup
 MAIN_KB = ReplyKeyboardMarkup(
     [
         ["📊 Сегодня", "📅 Месяц"],
-        ["🏠 Счета", "⚙️ Меню"],
+        ["🏦 Копилка", "⚙️ Меню"],
     ],
     resize_keyboard=True,
 )

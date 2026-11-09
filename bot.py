@@ -1995,6 +1995,10 @@ def menu_hub_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧾 Траты", callback_data="menu_history"),
         ],
         [
+            InlineKeyboardButton("🏠 Обязательные счета", callback_data="bills_refresh"),
+            InlineKeyboardButton("📚 Архив месяцев", callback_data="menu_months"),
+        ],
+        [
             InlineKeyboardButton("📈 Графика трат", callback_data="chart_overview"),
             InlineKeyboardButton("🏷 Траты по категориям", callback_data="menu_categories"),
         ],
@@ -2003,10 +2007,7 @@ def menu_hub_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📥 Скачать Excel", callback_data="menu_excel"),
         ],
         [
-            InlineKeyboardButton("📚 Архив месяцев", callback_data="menu_months"),
             InlineKeyboardButton("⚙️ Настройки бюджета", callback_data="menu_settings"),
-        ],
-        [
             InlineKeyboardButton("↩️ Отменить последнюю", callback_data="menu_undo"),
         ],
     ])
@@ -2090,11 +2091,12 @@ async def show_menu_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите нужный раздел или отчёт:\n"
         "• 🏦 *Копилка* — баланс, история пополнений и финансовые цели\n"
         "• 🧾 *Траты* — список последних трат с возможностью правки\n"
+        "• 🏠 *Счета* — обязательные расходы и статус оплаты\n"
+        "• 📚 *Архив* — сравнение и история прошлых месяцев\n"
         "• 📈 *Графика* — визуальные диаграммы расходов и календаря\n"
         "• 🏷 *Категории* — подробная разбивка расходов по статьям\n"
         "• 📱 *Виджеты & Web App* — для iOS (Scriptable, Команды) и Android (KWGT)\n"
         "• 📥 *Excel* — полная выгрузка персональной таблицы\n"
-        "• 📚 *Архив* — сравнение и история прошлых месяцев\n"
         "• ⚙️ *Настройки* — доходы, параметры лимита и компактный режим\n"
         "• ↩️ *Отмена* — быстрый откат последней добавленной траты\n\n"
         "💡 _Подсказка: чтобы записать трату, просто отправьте, например: `450 продукты`._"
@@ -2221,10 +2223,6 @@ async def show_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             InlineKeyboardButton("🏷 Категории", callback_data="menu_categories"),
-            InlineKeyboardButton("📚 Архив месяцев", callback_data="menu_months"),
-        ],
-        [
-            InlineKeyboardButton("🏠 Обязательные счета", callback_data="bills_refresh"),
         ],
     ])
     await _msg(update).reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=month_kb)
