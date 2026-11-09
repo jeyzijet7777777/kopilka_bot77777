@@ -341,7 +341,14 @@ def test_restore_of_legacy_backup_migrates_candidate_first(tmp_path):
     cand, info = datasafe.prepare_restore(legacy_copy, TODAY)
     assert info["version"] == migrations.SCHEMA_VERSION
     datasafe.apply_restore(cand, live, str(tmp_path / "bk"))
-    assert dump(live) == {**dump(legacy), "mandatory_payments": []}
+    live_dump = dump(live)
+    legacy_dump = dump(legacy)
+    assert live_dump.get("mandatory_payments") == []
+    assert [r[:6] for r in live_dump["expenses"]] == legacy_dump["expenses"]
+    assert all(r[6] == "" for r in live_dump["expenses"])
+    assert {k: v for k, v in live_dump.items() if k not in ("mandatory_payments", "expenses")} == {
+        k: v for k, v in legacy_dump.items() if k != "expenses"
+    }
 
 
 def test_restore_accepts_gzip(tmp_path):

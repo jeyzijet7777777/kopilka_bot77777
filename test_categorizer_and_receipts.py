@@ -504,11 +504,36 @@ def test_init_db_auto_recategorizes_existing_expenses(clean_db):
     bot.init_db()
 
     with db() as conn:
-        rows = {r["amount"]: r["category"] for r in conn.execute("SELECT amount, category FROM expenses WHERE user_id = 1").fetchall()}
+        rows = {r["amount"]: (r["category"], r["comment"]) for r in conn.execute("SELECT amount, category, comment FROM expenses WHERE user_id = 1").fetchall()}
 
-    assert rows[280.0] == "Продукты"
-    assert rows[148.0] == "Здоровье"
-    assert rows[120.0] == "Дом"
+    assert rows[280.0] == ("Продукты", "Помело")
+    assert rows[148.0] == ("Здоровье", "От обветривания")
+    assert rows[120.0] == ("Дом", "Почтовые конверты")
+
+
+def test_history_and_excel_show_item_description(clean_db):
+    uid = 1
+    upd, msg = make_update(uid=uid, text="280 помело")
+    run(bot.text_handler(upd, make_ctx()))
+
+    with db() as conn:
+        row = conn.execute("SELECT amount, category, comment FROM expenses WHERE user_id = 1").fetchone()
+        assert row["amount"] == 280.0
+        assert row["category"] == "Продукты"
+        assert row["comment"] == "Помело"
+
+    hist_text, hist_kb = bot.build_history(uid)
+    assert "Помело · _Продукты_" in hist_text
+    btn_text = hist_kb.inline_keyboard[0][0].text
+    assert "Помело (Продукты)" in btn_text
+
+    import openpyxl
+    buf = bot.update_excel_file(uid)
+    wb = openpyxl.load_workbook(buf)
+    ws = wb.active
+    # Проверяем, что в колонке H есть детализация
+    h_vals = [ws[f"H{r}"].value for r in range(6, 37) if ws[f"H{r}"].value]
+    assert any("Продукты (Помело): 280₽" in str(v) for v in h_vals)
 
 
 

@@ -23,6 +23,7 @@ from typing import Any, Callable
 from aiohttp import web
 from kopilka.database.connection import db
 from kopilka.database.repository import get_setting, set_setting
+from kopilka.services.categorizer import classify_expense as default_classify_expense
 from kopilka.services.goals_service import get_piggy_goal
 from kopilka.utils.formatting import fmt_money, today_date
 from kopilka.utils.parsers import parse_expense_message
@@ -188,8 +189,10 @@ def get_widget_summary_data(user_id: int) -> dict[str, Any]:
 
     # Последние 5 трат за сегодня
     with db() as conn:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+        col_str = "id, amount, category, comment, created_at" if "comment" in cols else "id, amount, category, '' AS comment, created_at"
         rows = conn.execute(
-            "SELECT id, amount, category, created_at FROM expenses "
+            f"SELECT {col_str} FROM expenses "
             "WHERE user_id = ? AND spent_date = ? ORDER BY id DESC LIMIT 5",
             (user_id, today.isoformat()),
         ).fetchall()
@@ -199,6 +202,7 @@ def get_widget_summary_data(user_id: int) -> dict[str, Any]:
                 "amount": float(r["amount"]),
                 "amount_fmt": fmt_money(float(r["amount"])),
                 "category": r["category"],
+                "comment": r["comment"] or "",
             }
             for r in rows
         ]
@@ -239,10 +243,13 @@ def add_widget_expense_sync(
     amount: float | None = None,
     category: str | None = None,
     text: str | None = None,
+    comment: str | None = None,
 ) -> dict[str, Any]:
-    """Добавляет трату из API (по сумме/категории или из текста вроде «450 кофе»)."""
+    """Добавляет трату из API (по сумме/категории, из текста вроде «450 кофе» или с комментарием товара)."""
     today = today_date()
     spent_date = today
+
+    item_desc = (comment or "").strip()
 
     if text and not amount:
         parsed = parse_expense_message(text)
@@ -251,24 +258,41 @@ def add_widget_expense_sync(
         amount, cat_raw, spent_d = parsed
         spent_date = spent_d if spent_d <= today else today
         category = cat_raw
+        if not item_desc:
+            item_desc = cat_raw
 
     if not amount or amount <= 0:
         raise ValueError("Сумма расхода должна быть больше 0")
 
     cat_name = (category or "Разное").strip()
-    if _CLASSIFY_CAT and cat_name != "Разное":
-        classified, _ = _CLASSIFY_CAT(user_id, cat_name)
-        if classified and classified != "Разное":
-            cat_name = classified
+    classify_fn = _CLASSIFY_CAT or default_classify_expense
+    if classify_fn:
+        probe = item_desc or cat_name
+        if probe and probe != "Разное":
+            try:
+                classified, _ = classify_fn(user_id, probe)
+                if classified and classified != "Разное":
+                    cat_name = classified
+            except Exception:
+                pass
 
     if _CANONICAL_CAT:
         cat_name = _CANONICAL_CAT(user_id, cat_name)
 
+    clean_comm = item_desc if item_desc.lower() != cat_name.lower() else ""
+
     with db() as conn:
-        exp_id = conn.execute(
-            "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
-            (user_id, spent_date.isoformat(), float(amount), cat_name),
-        ).lastrowid
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+        if "comment" in cols:
+            exp_id = conn.execute(
+                "INSERT INTO expenses (user_id, spent_date, amount, category, comment) VALUES (?, ?, ?, ?, ?)",
+                (user_id, spent_date.isoformat(), float(amount), cat_name, clean_comm),
+            ).lastrowid
+        else:
+            exp_id = conn.execute(
+                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                (user_id, spent_date.isoformat(), float(amount), cat_name),
+            ).lastrowid
 
     summary = get_widget_summary_data(user_id)
     return {
@@ -277,6 +301,7 @@ def add_widget_expense_sync(
         "amount": float(amount),
         "amount_fmt": fmt_money(float(amount)),
         "category": cat_name,
+        "comment": clean_comm,
         "spent_date": spent_date.isoformat(),
         "summary": summary,
     }
@@ -333,6 +358,7 @@ async def handle_post_expense(request: web.Request) -> web.Response:
     amount = None
     category = None
     text = None
+    comment = None
 
     if request.content_type == "application/json":
         try:
@@ -340,6 +366,7 @@ async def handle_post_expense(request: web.Request) -> web.Response:
             amount = body.get("amount")
             category = body.get("category")
             text = body.get("text")
+            comment = body.get("comment")
         except Exception:
             return web.json_response({"ok": False, "error": "Некорректный JSON"}, status=400, headers=_cors_headers())
     else:
@@ -347,6 +374,7 @@ async def handle_post_expense(request: web.Request) -> web.Response:
         amount = post_data.get("amount")
         category = post_data.get("category")
         text = post_data.get("text")
+        comment = post_data.get("comment")
 
     try:
         amt_float = float(amount) if amount is not None else None
@@ -354,7 +382,7 @@ async def handle_post_expense(request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Сумма должна быть числом"}, status=400, headers=_cors_headers())
 
     try:
-        res = add_widget_expense_sync(user_id, amount=amt_float, category=category, text=text)
+        res = add_widget_expense_sync(user_id, amount=amt_float, category=category, text=text, comment=comment)
         return web.json_response(res, headers=_cors_headers())
     except Exception as e:
         logger.exception("Ошибка добавления расхода через виджет API")
@@ -375,6 +403,112 @@ async def handle_delete_expense(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "deleted_id": eid, "summary": get_widget_summary_data(user_id)}, headers=_cors_headers())
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=400, headers=_cors_headers())
+
+
+async def handle_classify(request: web.Request) -> web.Response:
+    token = request.match_info.get("token", "")
+    user_id = get_user_id_by_token(token)
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Неверный токен доступа"}, status=401, headers=_cors_headers())
+    q = (request.query.get("q") or "").strip()
+    if not q:
+        return web.json_response({"ok": True, "category": "Разное", "keyword": ""}, headers=_cors_headers())
+    cat = "Разное"
+    kw = ""
+    classify_fn = _CLASSIFY_CAT or default_classify_expense
+    if classify_fn:
+        try:
+            c, k = classify_fn(user_id, q)
+            if c:
+                cat = c
+                kw = k or ""
+        except Exception:
+            pass
+    return web.json_response({"ok": True, "category": cat, "keyword": kw, "query": q}, headers=_cors_headers())
+
+
+async def handle_post_receipt(request: web.Request) -> web.Response:
+    token = request.match_info.get("token", "")
+    user_id = get_user_id_by_token(token)
+    if not user_id:
+        return web.json_response({"ok": False, "error": "Неверный токен доступа"}, status=401, headers=_cors_headers())
+
+    from kopilka.services.receipt_scanner import scan_receipt_image
+
+    image_bytes = None
+    save_immediately = request.query.get("save", "1") in ("1", "true", "yes")
+
+    if request.content_type.startswith("multipart/"):
+        reader = await request.multipart()
+        field = await reader.next()
+        while field:
+            if field.name in ("file", "receipt", "photo", "image"):
+                image_bytes = await field.read()
+                break
+            field = await reader.next()
+    elif request.content_type == "application/json":
+        import base64
+        body = await request.json()
+        b64 = body.get("image_base64") or body.get("photo") or ""
+        if "," in b64:
+            b64 = b64.split(",", 1)[1]
+        if b64:
+            image_bytes = base64.b64decode(b64)
+        if "save" in body:
+            save_immediately = bool(body.get("save"))
+    else:
+        image_bytes = await request.read()
+
+    if not image_bytes:
+        return web.json_response({"ok": False, "error": "Файл изображения не передан"}, status=400, headers=_cors_headers())
+
+    try:
+        scan_res = await asyncio.to_thread(scan_receipt_image, image_bytes, user_id=user_id)
+    except Exception as e:
+        logger.exception("Ошибка при распознавании чека:")
+        return web.json_response({"ok": False, "error": f"Ошибка распознавания: {e}"}, status=500, headers=_cors_headers())
+
+    if not scan_res or not scan_res.get("success") or not scan_res.get("amount"):
+        return web.json_response({
+            "ok": False,
+            "error": scan_res.get("error") if scan_res else "Не удалось распознать чек",
+            "merchant": scan_res.get("merchant") if scan_res else None,
+        }, status=422, headers=_cors_headers())
+
+    amount = float(scan_res["amount"])
+    category = scan_res.get("category") or "Продукты"
+    merchant = scan_res.get("merchant") or ""
+    items = scan_res.get("items") or []
+    preview = ", ".join(items[:3]) if items else ""
+    comment = f"{merchant}: {preview}" if (merchant and preview) else (merchant or preview or "")
+
+    if save_immediately:
+        exp_res = add_widget_expense_sync(user_id, amount=amount, category=category, comment=comment)
+        return web.json_response({
+            "ok": True,
+            "saved": True,
+            "expense": exp_res,
+            "parsed": {
+                "amount": amount,
+                "category": category,
+                "merchant": merchant,
+                "comment": comment,
+                "method": scan_res.get("method"),
+            },
+            "summary": exp_res.get("summary"),
+        }, headers=_cors_headers())
+
+    return web.json_response({
+        "ok": True,
+        "saved": False,
+        "parsed": {
+            "amount": amount,
+            "category": category,
+            "merchant": merchant,
+            "comment": comment,
+            "method": scan_res.get("method"),
+        },
+    }, headers=_cors_headers())
 
 
 async def handle_get_scriptable(request: web.Request) -> web.Response:
@@ -1074,33 +1208,94 @@ async def handle_webapp(request: web.Request) -> web.Response:
       justify-content: space-between;
       gap: 6px;
     }}
-    .input-row {{
-      display: grid;
-      grid-template-columns: 112px minmax(0, 1fr);
-      gap: 8px;
+    .smart-input-wrap {{
       margin-bottom: 10px;
       width: 100%;
+      position: relative;
     }}
-    .input-row input, .login-input {{
+    .smart-input, .login-input {{
       width: 100%;
       min-width: 0;
-      background: rgba(0, 0, 0, 0.26);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 12px;
-      padding: 11px 12px;
+      background: rgba(0, 0, 0, 0.28);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 14px;
+      padding: 13px 14px;
       color: var(--text);
-      font-size: 15px;
+      font-size: 16px;
       outline: none;
-      transition: border-color 0.2s;
-      -moz-appearance: textfield;
-    }}
-    .input-row input::-webkit-outer-spin-button,
-    .input-row input::-webkit-inner-spin-button {{
+      transition: border-color 0.2s, box-shadow 0.2s;
       -webkit-appearance: none;
-      margin: 0;
     }}
-    .input-row input:focus, .login-input:focus {{
+    .smart-input:focus, .login-input:focus {{
       border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.15);
+    }}
+    .btn-receipt-upload {{
+      background: rgba(56, 189, 248, 0.16);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      padding: 5px 11px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: 0.18s;
+      user-select: none;
+    }}
+    .btn-receipt-upload:active {{
+      transform: scale(0.96);
+    }}
+    .smart-preview {{
+      margin-top: 6px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 20px;
+    }}
+    .preview-badge {{
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(56, 189, 248, 0.12);
+      color: var(--accent);
+      padding: 3px 8px;
+      border-radius: 8px;
+      font-weight: 600;
+    }}
+    .receipt-loading {{
+      background: rgba(56, 189, 248, 0.1);
+      border: 1px dashed rgba(56, 189, 248, 0.4);
+      color: var(--accent);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      text-align: center;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }}
+    .spinner {{
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(56, 189, 248, 0.3);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      display: inline-block;
+    }}
+    @keyframes spin {{
+      to {{ transform: rotate(360deg); }}
+    }}
+    .exp-comm {{
+      font-weight: 600;
+      color: var(--text);
     }}
     .chips {{
       display: flex;
@@ -1319,10 +1514,19 @@ async def handle_webapp(request: web.Request) -> web.Response:
       <div class="add-box">
         <div class="box-title">
           <span>⚡️ Быстрая запись расхода</span>
+          <label for="inpReceipt" class="btn-receipt-upload" id="lblReceipt" title="Загрузить фото чека">
+            📷 Чек
+            <input type="file" id="inpReceipt" accept="image/*" capture="environment" style="display: none;">
+          </label>
         </div>
-        <div class="input-row">
-          <input type="number" id="inpAmount" placeholder="Сумма (₽)" inputmode="decimal">
-          <input type="text" id="inpNote" placeholder="Магазин / Товар">
+        <div class="smart-input-wrap">
+          <input type="text" id="inpSmart" class="smart-input" placeholder="Например: 450 кофе или 280 помело" autocomplete="off">
+          <div class="smart-preview" id="smartPreview" style="display: none;">
+            <span class="preview-badge" id="previewBadge">✨ 450 ₽ • Кофе · Кафе</span>
+          </div>
+        </div>
+        <div class="receipt-loading" id="receiptLoading" style="display: none;">
+          <span class="spinner"></span> Распознавание чека и QR-кода...
         </div>
         <div class="chips" id="chipsBox">
           <div class="chip active" data-cat="Продукты">🛒 Продукты</div>
@@ -1424,12 +1628,32 @@ async def handle_webapp(request: web.Request) -> web.Response:
     }}
 
     let selectedCat = "Продукты";
+    let manualCategoryOverride = false;
+    let parsedAmount = null;
+    let parsedItem = "";
+    let classifyTimeout = null;
+
     const chips = document.querySelectorAll(".chip");
+    function selectCategoryChip(catName) {{
+      if (!catName) return;
+      chips.forEach(c => {{
+        if (c.dataset.cat.toLowerCase() === catName.toLowerCase()) {{
+          chips.forEach(x => x.classList.remove("active"));
+          c.classList.add("active");
+          selectedCat = c.dataset.cat;
+        }}
+      }});
+    }}
+
     chips.forEach(c => {{
       c.addEventListener("click", () => {{
+        manualCategoryOverride = true;
         chips.forEach(x => x.classList.remove("active"));
         c.classList.add("active");
         selectedCat = c.dataset.cat;
+        if (parsedAmount || parsedItem) {{
+          updateSmartPreview();
+        }}
       }});
     }});
 
@@ -1477,12 +1701,18 @@ async def handle_webapp(request: web.Request) -> web.Response:
       if (!data.recent_expenses || data.recent_expenses.length === 0) {{
         box.innerHTML = `<div style="color: var(--hint); font-size: 13px; text-align: center; padding: 8px;">Сегодня пока нет трат</div>`;
       }} else {{
-        box.innerHTML = data.recent_expenses.map(e => `
-          <div class="exp-item">
-            <div class="exp-info"><b>${{e.amount_fmt}}</b> <span style="color: var(--hint);">• ${{e.category}}</span></div>
-            <div class="exp-del" onclick="deleteExpense(${{e.id}})">✕</div>
-          </div>
-        `).join("");
+        box.innerHTML = data.recent_expenses.map(e => {{
+          const comm = (e.comment || "").trim();
+          const itemDesc = (comm && comm.toLowerCase() !== (e.category || "").toLowerCase())
+            ? `<span class="exp-comm">${{comm}}</span> <span style="color: var(--hint);">· ${{e.category}}</span>`
+            : `<span style="color: var(--hint);">${{e.category}}</span>`;
+          return `
+            <div class="exp-item">
+              <div class="exp-info"><b>${{e.amount_fmt}}</b> • ${{itemDesc}}</div>
+              <div class="exp-del" onclick="deleteExpense(${{e.id}})">✕</div>
+            </div>
+          `;
+        }}).join("");
       }}
     }}
 
@@ -1573,20 +1803,71 @@ async def handle_webapp(request: web.Request) -> web.Response:
       loadData();
     }}
 
-    async function submitExpense() {{
-      if (!currentToken) return;
-      const amtInput = document.getElementById("inpAmount");
-      const noteInput = document.getElementById("inpNote");
-      const amount = parseFloat((amtInput.value || "").replace(",", "."));
-      if (!amount || amount <= 0) {{
-        alert("Введите сумму расхода");
+    function parseSmartInput(val) {{
+      const raw = (val || "").trim();
+      if (!raw) return {{ amount: null, item: "" }};
+      let amt = null;
+      let item = "";
+      const mStart = raw.match(/^(\\d+(?:[\\s_]\\d+)*(?:[.,]\\d+)?)\\s*(.*)$/);
+      if (mStart) {{
+        amt = parseFloat(mStart[1].replace(/[\\s_]/g, "").replace(",", "."));
+        item = mStart[2].trim();
+      }} else {{
+        const mEnd = raw.match(/^(.*?)\\s*(\\d+(?:[\\s_]\\d+)*(?:[.,]\\d+)?)$/);
+        if (mEnd) {{
+          amt = parseFloat(mEnd[2].replace(/[\\s_]/g, "").replace(",", "."));
+          item = mEnd[1].trim();
+        }}
+      }}
+      return {{ amount: amt, item: item }};
+    }}
+
+    function updateSmartPreview() {{
+      const smartPreview = document.getElementById("smartPreview");
+      const previewBadge = document.getElementById("previewBadge");
+      if (!parsedAmount && !parsedItem) {{
+        smartPreview.style.display = "none";
         return;
       }}
+      smartPreview.style.display = "flex";
+      const amtStr = parsedAmount ? `${{Math.round(parsedAmount * 100) / 100}} ₽` : "… ₽";
+      const itemStr = parsedItem ? ` • ${{parsedItem}}` : "";
+      previewBadge.innerHTML = `✨ <b>${{amtStr}}</b>${{itemStr}} <span style="color: var(--hint);">· ${{selectedCat}}</span>`;
+    }}
 
+    const inpSmart = document.getElementById("inpSmart");
+    inpSmart.addEventListener("input", () => {{
+      const parsed = parseSmartInput(inpSmart.value);
+      parsedAmount = parsed.amount;
+      parsedItem = parsed.item;
+      updateSmartPreview();
+
+      if (parsedItem && !manualCategoryOverride) {{
+        clearTimeout(classifyTimeout);
+        classifyTimeout = setTimeout(async () => {{
+          try {{
+            const res = await fetch(`${{BASE_URL}}/api/v1/${{encodeURIComponent(currentToken)}}/classify?q=` + encodeURIComponent(parsedItem));
+            const data = await res.json();
+            if (data.ok && data.category && data.category !== "Разное" && !manualCategoryOverride) {{
+              selectCategoryChip(data.category);
+              updateSmartPreview();
+            }}
+          }} catch (e) {{}}
+        }}, 220);
+      }}
+    }});
+
+    async function submitExpense() {{
+      if (!currentToken) return;
+      const parsed = parseSmartInput(inpSmart.value);
+      let amount = parsed.amount;
+      let comment = parsed.item;
       let category = selectedCat;
-      const note = noteInput.value.trim();
-      if (note) {{
-        category = note;
+
+      if (!amount || amount <= 0) {{
+        alert("Введите сумму расхода, например: 450 кофе или 280 помело");
+        inpSmart.focus();
+        return;
       }}
 
       if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
@@ -1599,10 +1880,13 @@ async def handle_webapp(request: web.Request) -> web.Response:
         await fetch(`${{BASE_URL}}/api/v1/${{encodeURIComponent(currentToken)}}/expense`, {{
           method: "POST",
           headers: {{ "Content-Type": "application/json" }},
-          body: JSON.stringify({{ amount: amount, category: category }})
+          body: JSON.stringify({{ amount: amount, category: category, comment: comment }})
         }});
-        amtInput.value = "";
-        noteInput.value = "";
+        inpSmart.value = "";
+        parsedAmount = null;
+        parsedItem = "";
+        manualCategoryOverride = false;
+        document.getElementById("smartPreview").style.display = "none";
         await loadData();
       }} catch (e) {{
         alert("Ошибка записи");
@@ -1613,11 +1897,53 @@ async def handle_webapp(request: web.Request) -> web.Response:
     }}
 
     document.getElementById("btnSubmit").addEventListener("click", submitExpense);
-    document.getElementById("inpAmount").addEventListener("keydown", (e) => {{
+    inpSmart.addEventListener("keydown", (e) => {{
       if (e.key === "Enter") submitExpense();
     }});
-    document.getElementById("inpNote").addEventListener("keydown", (e) => {{
-      if (e.key === "Enter") submitExpense();
+
+    // Загрузка фото чека с распознаванием
+    const inpReceipt = document.getElementById("inpReceipt");
+    const receiptLoading = document.getElementById("receiptLoading");
+
+    inpReceipt.addEventListener("change", async (e) => {{
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      if (!currentToken) return;
+
+      receiptLoading.style.display = "flex";
+      if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("medium");
+
+      const formData = new FormData();
+      formData.append("file", file);
+
+      try {{
+        const res = await fetch(`${{BASE_URL}}/api/v1/${{encodeURIComponent(currentToken)}}/receipt?save=1`, {{
+          method: "POST",
+          body: formData
+        }});
+        const data = await res.json();
+        if (!data.ok) {{
+          alert(data.error || "Не удалось распознать чек");
+          return;
+        }}
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+        const p = data.parsed || {{}};
+        const smartPreview = document.getElementById("smartPreview");
+        const previewBadge = document.getElementById("previewBadge");
+        smartPreview.style.display = "flex";
+        previewBadge.innerHTML = `✅ Чек: <b>${{p.amount}} ₽</b> · ${{p.comment || p.category}}`;
+        setTimeout(() => {{ smartPreview.style.display = "none"; }}, 4000);
+        if (data.summary) {{
+          renderSummary(data.summary);
+        }} else {{
+          await loadData();
+        }}
+      }} catch (err) {{
+        alert("Ошибка отправки фото чека");
+      }} finally {{
+        receiptLoading.style.display = "none";
+        inpReceipt.value = "";
+      }}
     }});
 
     // Модальное окно установки на рабочий стол / главный экран
@@ -1719,8 +2045,10 @@ def create_widget_app() -> web.Application:
     app.router.add_get("/manifest.json", handle_manifest)
     app.router.add_post("/api/v1/auth/login", handle_auth_login)
     app.router.add_get("/api/v1/{token}/summary", handle_get_summary)
+    app.router.add_get("/api/v1/{token}/classify", handle_classify)
     app.router.add_post("/api/v1/{token}/expense", handle_post_expense)
     app.router.add_post("/api/v1/{token}/expense/{exp_id}", handle_delete_expense)
+    app.router.add_post("/api/v1/{token}/receipt", handle_post_receipt)
     app.router.add_get("/api/v1/{token}/scriptable", handle_get_scriptable)
     app.router.add_get("/api/v1/{token}/shortcuts", handle_get_shortcuts)
     app.router.add_get("/api/v1/{token}/kwgt", handle_get_kwgt)

@@ -123,10 +123,17 @@ def _v2_mandatory_payments(conn: sqlite3.Connection, ctx: dict) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_mand_pay_item ON mandatory_payments(mandatory_id, month)")
 
 
+def _v3_expense_comment(conn: sqlite3.Connection, ctx: dict) -> None:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(expenses)")]
+    if "comment" not in cols:
+        conn.execute("ALTER TABLE expenses ADD COLUMN comment TEXT DEFAULT ''")
+
+
 # (версия, описание, функция). Новые миграции — только в конец списка.
 MIGRATIONS = [
     (1, "базовая схема (всё, что было до введения версий)", _v1_baseline),
     (2, "учёт фактических оплат обязательных трат (mandatory_payments)", _v2_mandatory_payments),
+    (3, "детализация трат: название товара / комментарий (comment)", _v3_expense_comment),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 

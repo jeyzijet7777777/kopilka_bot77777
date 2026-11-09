@@ -77,7 +77,11 @@ def test_adopted_db_migrates_without_loss_and_startup_sees_no_loss(lay):
     migrations.migrate(lay.db, TODAY, backup_dir=str(lay.data / "backups"))
     after = dump(lay.db)
     for table, rows in before.items():
-        assert after[table] == rows, table
+        if table == "expenses":
+            assert [r[:6] for r in after[table]] == rows
+            assert all(r[6] == "" for r in after[table])
+        else:
+            assert after[table] == rows, table
     c = sqlite3.connect(lay.db)
     assert c.execute("PRAGMA user_version").fetchone()[0] == migrations.SCHEMA_VERSION
     c.close()

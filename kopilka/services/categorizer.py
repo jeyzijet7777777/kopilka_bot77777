@@ -991,6 +991,9 @@ def recategorize_user_expenses(user_id: int | None = None, db_path: str = None) 
         changes: dict[tuple[str, str], int] = {}
         updated_count = 0
 
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+        has_comment = "comment" in cols
+
         for r in rows:
             uid = r["user_id"]
             old_cat = r["category"]
@@ -1000,7 +1003,13 @@ def recategorize_user_expenses(user_id: int | None = None, db_path: str = None) 
             new_cat, matched_kw = classify_expense(uid, old_cat, None)
 
             if matched_kw and new_cat and new_cat != "Разное" and _clean_token(new_cat) != _clean_token(old_cat):
-                conn.execute("UPDATE expenses SET category = ? WHERE id = ?", (new_cat, exp_id))
+                if has_comment:
+                    conn.execute(
+                        "UPDATE expenses SET category = ?, comment = CASE WHEN comment IS NULL OR comment = '' THEN ? ELSE comment END WHERE id = ?",
+                        (new_cat, old_cat, exp_id),
+                    )
+                else:
+                    conn.execute("UPDATE expenses SET category = ? WHERE id = ?", (new_cat, exp_id))
                 changes[(old_cat, new_cat)] = changes.get((old_cat, new_cat), 0) + 1
                 updated_count += 1
 

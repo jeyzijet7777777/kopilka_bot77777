@@ -777,13 +777,15 @@ def suggestion_rows(user_id: int, exp_id: int, category: str, was_default: bool,
 # --- Правка трат ---
 def get_expense(user_id: int, exp_id: int):
     with db() as conn:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+        col_str = "id, spent_date, amount, category, comment" if "comment" in cols else "id, spent_date, amount, category, '' AS comment"
         return conn.execute(
-            "SELECT id, spent_date, amount, category FROM expenses WHERE id = ? AND user_id = ?",
+            f"SELECT {col_str} FROM expenses WHERE id = ? AND user_id = ?",
             (exp_id, user_id),
         ).fetchone()
 
 
-def update_expense(user_id: int, exp_id: int, *, amount=None, category=None, spent_date=None):
+def update_expense(user_id: int, exp_id: int, *, amount=None, category=None, spent_date=None, comment=None):
     """Меняет только переданные поля. Возвращает обновлённую запись или None, если траты нет."""
     sets, args = [], []
     if amount is not None:
@@ -795,14 +797,27 @@ def update_expense(user_id: int, exp_id: int, *, amount=None, category=None, spe
     if spent_date is not None:
         sets.append("spent_date = ?")
         args.append(spent_date.isoformat())
+    if comment is not None:
+        sets.append("comment = ?")
+        args.append(str(comment).strip())
     with db() as conn:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
         if sets:
-            conn.execute(
-                f"UPDATE expenses SET {', '.join(sets)} WHERE id = ? AND user_id = ?",
-                (*args, exp_id, user_id),
-            )
+            # Если в таблице ещё нет comment, исключаем его из SET
+            if "comment" not in cols:
+                sets_filtered = [s for s in sets if not s.startswith("comment =")]
+                args_filtered = [a for s, a in zip(sets, args) if not s.startswith("comment =")]
+            else:
+                sets_filtered = sets
+                args_filtered = args
+            if sets_filtered:
+                conn.execute(
+                    f"UPDATE expenses SET {', '.join(sets_filtered)} WHERE id = ? AND user_id = ?",
+                    (*args_filtered, exp_id, user_id),
+                )
+        col_str = "id, spent_date, amount, category, comment" if "comment" in cols else "id, spent_date, amount, category, '' AS comment"
         return conn.execute(
-            "SELECT id, spent_date, amount, category FROM expenses WHERE id = ? AND user_id = ?",
+            f"SELECT {col_str} FROM expenses WHERE id = ? AND user_id = ?",
             (exp_id, user_id),
         ).fetchone()
 
@@ -821,10 +836,13 @@ def build_expense_card(user_id: int, exp_id: int, note: str = ""):
     if not row:
         return "ℹ️ Эта трата уже удалена.", None
     d = datetime.date.fromisoformat(row["spent_date"])
+    comm = (row["comment"] or "").strip()
+    item_line = f"📝 На что: *{esc(comm)}*\n" if comm and comm.lower() != row["category"].lower() else ""
     text = (
         f"{note}✏️ *Редактирование траты*\n\n"
         f"💰 Сумма: *{fmt_money(row['amount'])}*\n"
         f"🏷 Категория: *{esc(row['category'])}*\n"
+        f"{item_line}"
         f"📅 Дата: *{d.strftime('%d.%m.%Y')}*\n\n"
         "Что изменить?"
     )
@@ -924,8 +942,10 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.By
 
     month_prefix = f"{first_day.year:04d}-{first_day.month:02d}-"
     with db() as conn:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+        col_str = "spent_date, amount, category, comment" if "comment" in cols else "spent_date, amount, category, '' AS comment"
         rows = conn.execute(
-            "SELECT spent_date, amount, category FROM expenses "
+            f"SELECT {col_str} FROM expenses "
             "WHERE user_id = ? AND spent_date LIKE ? ORDER BY spent_date, id",
             (user_id, month_prefix + "%"),
         ).fetchall()
@@ -933,7 +953,8 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.By
     by_day = {}
     for r in rows:
         d_num = int(r["spent_date"].split("-")[2])
-        by_day.setdefault(d_num, []).append((r["amount"], r["category"]))
+        comm = (r["comment"] or "").strip()
+        by_day.setdefault(d_num, []).append((r["amount"], r["category"], comm))
 
     lims = limits_between(user_id, first_day, datetime.date(first_day.year, first_day.month, real_days))
     t_today = today_date()
@@ -950,9 +971,14 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.By
         if day_num in by_day:
             items = by_day[day_num]
             ws[f"G{row_idx}"] = sum(x[0] for x in items)
-            ws[f"H{row_idx}"] = " | ".join(
-                f"{cat}: {int(amt) if float(amt).is_integer() else amt}₽" for amt, cat in items
-            )
+            parts = []
+            for amt, cat, comm in items:
+                amt_str = f"{int(amt) if float(amt).is_integer() else amt}₽"
+                if comm and comm.lower() != cat.lower():
+                    parts.append(f"{cat} ({comm}): {amt_str}")
+                else:
+                    parts.append(f"{cat}: {amt_str}")
+            ws[f"H{row_idx}"] = " | ".join(parts)
         elif start_d <= cur_date < t_today:
             ws[f"G{row_idx}"] = 0
             ws[f"H{row_idx}"] = "Без трат"
@@ -1090,8 +1116,10 @@ def build_settings_text(user_id: int) -> str:
 def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
     info = get_budget_info(user_id, target_date)
     with db() as conn:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+        col_str = "id, amount, category, comment" if "comment" in cols else "id, amount, category, '' AS comment"
         rows = conn.execute(
-            "SELECT id, amount, category FROM expenses WHERE user_id = ? AND spent_date = ? ORDER BY id",
+            f"SELECT {col_str} FROM expenses WHERE user_id = ? AND spent_date = ? ORDER BY id",
             (user_id, target_date.isoformat()),
         ).fetchall()
 
@@ -1107,9 +1135,13 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
     )
 
     if rows:
-        exp_text = "\n".join(
-            f"{i + 1}. *{fmt_money(r['amount'])}* — {esc(r['category'])}" for i, r in enumerate(rows)
-        )
+        def _line(r):
+            comm = (r["comment"] or "").strip()
+            if comm and comm.lower() != r["category"].lower():
+                return f"*{fmt_money(r['amount'])}* — {esc(comm)} · _{esc(r['category'])}_"
+            return f"*{fmt_money(r['amount'])}* — {esc(r['category'])}"
+
+        exp_text = "\n".join(f"{i + 1}. {_line(r)}" for i, r in enumerate(rows))
     else:
         exp_text = "_Пока нет записанных трат_"
 
@@ -1153,9 +1185,11 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
 
     kb_rows = []
     for r in rows:
-        btn_title = f"✏️ {r['category']} ({int(r['amount'])}₽)"
-        if len(btn_title) > 32:
-            btn_title = btn_title[:29] + "..."
+        comm = (r["comment"] or "").strip()
+        label = f"{comm} ({r['category']})" if comm and comm.lower() != r['category'].lower() else r['category']
+        btn_title = f"✏️ {label} ({int(r['amount'])}₽)"
+        if len(btn_title) > 36:
+            btn_title = btn_title[:33] + "..."
         kb_rows.append([
             InlineKeyboardButton(btn_title, callback_data=f"xe_open_{r['id']}"),
             InlineKeyboardButton("❌", callback_data=f"delexp_{r['id']}"),
@@ -2880,12 +2914,29 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
         category = canonical_category(user_id, category)
         method = result.get("method", "чек")
 
+        preview_items = ", ".join(result.get("items", [])[:3])
+        if merchant and preview_items:
+            receipt_comment = f"{merchant}: {preview_items}"
+        elif merchant:
+            receipt_comment = merchant
+        elif preview_items:
+            receipt_comment = preview_items
+        else:
+            receipt_comment = ""
+
         before = day_spent(user_id, spent_d)
         with db() as conn:
-            exp_id = conn.execute(
-                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
-                (user_id, spent_d.isoformat(), amount, category),
-            ).lastrowid
+            cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+            if "comment" in cols:
+                exp_id = conn.execute(
+                    "INSERT INTO expenses (user_id, spent_date, amount, category, comment) VALUES (?, ?, ?, ?, ?)",
+                    (user_id, spent_d.isoformat(), amount, category, receipt_comment),
+                ).lastrowid
+            else:
+                exp_id = conn.execute(
+                    "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                    (user_id, spent_d.isoformat(), amount, category),
+                ).lastrowid
 
         warning = limit_warning(user_id, spent_d, before, before + amount)
         top_cats = used_categories(user_id, limit=6, exclude=[category])
@@ -3062,8 +3113,10 @@ def build_history(user_id: int, page: int = 0):
     per_page = 12
     offset = max(0, page) * per_page
     with db() as conn:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+        col_str = "id, spent_date, amount, category, comment" if "comment" in cols else "id, spent_date, amount, category, '' AS comment"
         rows = conn.execute(
-            "SELECT id, spent_date, amount, category FROM expenses WHERE user_id = ? "
+            f"SELECT {col_str} FROM expenses WHERE user_id = ? "
             "ORDER BY spent_date DESC, id DESC LIMIT ? OFFSET ?",
             (user_id, per_page + 1, offset),
         ).fetchall()
@@ -3076,8 +3129,13 @@ def build_history(user_id: int, page: int = 0):
     buttons = []
     for r in rows:
         d = datetime.date.fromisoformat(r["spent_date"]).strftime("%d.%m")
-        lines.append(f"• {d} — *{fmt_money(r['amount'])}* {esc(r['category'])}")
-        title = f"✏️ {d} {int(r['amount'])}₽ {r['category']}"
+        comm = (r["comment"] or "").strip()
+        if comm and comm.lower() != r["category"].lower():
+            lines.append(f"• {d} — *{fmt_money(r['amount'])}* {esc(comm)} · _{esc(r['category'])}_")
+            title = f"✏️ {d} {int(r['amount'])}₽ {comm} ({r['category']})"
+        else:
+            lines.append(f"• {d} — *{fmt_money(r['amount'])}* {esc(r['category'])}")
+            title = f"✏️ {d} {int(r['amount'])}₽ {r['category']}"
         buttons.append([
             InlineKeyboardButton(title[:36], callback_data=f"xe_open_{r['id']}"),
             InlineKeyboardButton("❌", callback_data=f"hdelexp_{r['id']}"),
@@ -3566,6 +3624,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         amt = context.user_data.get("pending_amount")
         d_str = context.user_data.get("pending_date")
+        pending_comm = context.user_data.get("pending_comment", "")
         if not amt or not d_str:
             await query.message.edit_text("ℹ️ Данные ввода устарели. Введите сумму заново.")
             return
@@ -3573,13 +3632,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         spent_d = datetime.date.fromisoformat(d_str)
         context.user_data.clear()
 
+        clean_comm = pending_comm if pending_comm.lower() != cat_name.lower() else ""
         ensure_start_day(user_id)
         before = day_spent(user_id, spent_d)
         with db() as conn:
-            exp_id = conn.execute(
-                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
-                (user_id, spent_d.isoformat(), amt, cat_name),
-            ).lastrowid
+            cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+            if "comment" in cols:
+                exp_id = conn.execute(
+                    "INSERT INTO expenses (user_id, spent_date, amount, category, comment) VALUES (?, ?, ?, ?, ?)",
+                    (user_id, spent_d.isoformat(), amt, cat_name, clean_comm),
+                ).lastrowid
+            else:
+                exp_id = conn.execute(
+                    "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                    (user_id, spent_d.isoformat(), amt, cat_name),
+                ).lastrowid
         warning = limit_warning(user_id, spent_d, before, before + amt)
         report_text, markup = build_day_report(user_id, spent_d)
         await query.message.edit_text(
@@ -4262,6 +4329,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == "wait_pick_category_for_amount":
         amt = context.user_data.get("pending_amount")
         d_str = context.user_data.get("pending_date")
+        pending_comment = context.user_data.get("pending_comment", "")
         if amt and d_str:
             spent_d = datetime.date.fromisoformat(d_str)
             context.user_data.clear()
@@ -4273,12 +4341,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if classified_cat and classified_cat != "Разное":
                     cat_name = classified_cat
             cat_name = canonical_category(user_id, cat_name)
+            clean_comm = pending_comment if pending_comment.lower() != cat_name.lower() else ""
             before = day_spent(user_id, spent_d)
             with db() as conn:
-                exp_id = conn.execute(
-                    "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
-                    (user_id, spent_d.isoformat(), amt, cat_name),
-                ).lastrowid
+                cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+                if "comment" in cols:
+                    exp_id = conn.execute(
+                        "INSERT INTO expenses (user_id, spent_date, amount, category, comment) VALUES (?, ?, ?, ?, ?)",
+                        (user_id, spent_d.isoformat(), amt, cat_name, clean_comm),
+                    ).lastrowid
+                else:
+                    exp_id = conn.execute(
+                        "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                        (user_id, spent_d.isoformat(), amt, cat_name),
+                    ).lastrowid
             warning = limit_warning(user_id, spent_d, before, before + amt)
             report_text, markup = build_day_report(user_id, spent_d)
             await update.message.reply_text(
@@ -4480,10 +4556,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = canonical_category(user_id, classified_cat if classified_cat != "Разное" else (cap(merchant) or DEFAULT_CATEGORY))
         before = day_spent(user_id, spent_d)
         with db() as conn:
-            exp_id = conn.execute(
-                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
-                (user_id, spent_d.isoformat(), amount, category),
-            ).lastrowid
+            cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+            if "comment" in cols:
+                exp_id = conn.execute(
+                    "INSERT INTO expenses (user_id, spent_date, amount, category, comment) VALUES (?, ?, ?, ?, ?)",
+                    (user_id, spent_d.isoformat(), amount, category, merchant),
+                ).lastrowid
+            else:
+                exp_id = conn.execute(
+                    "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                    (user_id, spent_d.isoformat(), amount, category),
+                ).lastrowid
         warning = limit_warning(user_id, spent_d, before, before + amount)
         top_cats = used_categories(user_id, limit=6, exclude=[category])
         chips = category_chips(user_id, exp_id, top_cats) if top_cats else []
@@ -4566,6 +4649,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
     note_hint = ""
     candidate_chips = None
+    item_desc = ""
 
     if auto_cat_on and not was_default:
         classified_cat, matched_kw = classify_expense(user_id, category)
@@ -4574,19 +4658,31 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if classified_cat and classified_cat != "Разное" and cat_key(classified_cat) != cat_key(category) and not is_typo_of_classified:
             raw_input = category
+            item_desc = raw_input
             category = classified_cat
             similar = None
             note_hint = f"\n💡 _Категория подобрана по слову «{esc(raw_input)}»_"
             candidate_chips = [raw_input]
             context.user_data["last_auto_keyword"] = raw_input
+        elif not is_typo_of_classified and cat_key(category) != cat_key(classified_cat or ""):
+            item_desc = category
 
     category = canonical_category(user_id, category)  # «ПРОДУКТЫ» -> уже существующее «Продукты»
+    clean_comm = item_desc if item_desc.lower() != category.lower() else ""
+
     before = day_spent(user_id, spent_d)
     with db() as conn:
-        exp_id = conn.execute(
-            "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
-            (user_id, spent_d.isoformat(), amount, category),
-        ).lastrowid
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(expenses)")]
+        if "comment" in cols:
+            exp_id = conn.execute(
+                "INSERT INTO expenses (user_id, spent_date, amount, category, comment) VALUES (?, ?, ?, ?, ?)",
+                (user_id, spent_d.isoformat(), amount, category, clean_comm),
+            ).lastrowid
+        else:
+            exp_id = conn.execute(
+                "INSERT INTO expenses (user_id, spent_date, amount, category) VALUES (?, ?, ?, ?)",
+                (user_id, spent_d.isoformat(), amount, category),
+            ).lastrowid
 
     warning = limit_warning(user_id, spent_d, before, before + amount)
     extra = suggestion_rows(user_id, exp_id, category, was_default, similar, candidates=candidate_chips)

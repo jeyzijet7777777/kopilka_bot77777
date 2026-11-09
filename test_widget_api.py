@@ -64,10 +64,13 @@ def test_add_widget_expense_and_summary(env):
     res_text = add_widget_expense_sync(uid, text="350 кофе")
     assert res_text["ok"] is True
     assert res_text["amount"] == 350.0
+    assert res_text["category"] == "Кафе и рестораны"
+    assert res_text["comment"] == "Кофе"
 
     s3 = get_widget_summary_data(uid)
     assert s3["daily_spent"] == 800.0
     assert s3["daily_remaining"] == 1200.0
+    assert s3["recent_expenses"][0]["comment"] == "Кофе"
 
 def test_widget_http_endpoints(env):
     async def _run():
@@ -132,9 +135,34 @@ def test_widget_http_endpoints(env):
             assert wa_resp.status == 200
             wa_html = await wa_resp.text()
             assert "Mini App" in wa_html
-            assert "grid-template-columns: 112px minmax(0, 1fr)" in wa_html
+            assert "smart-input" in wa_html
+            assert "inpReceipt" in wa_html
             assert "overflow-x: hidden" in wa_html
             assert "kopilka_token" in wa_resp.cookies
+
+            # 8b. Classify API endpoint
+            cl_resp = await client.get(f"/api/v1/{tok}/classify?q=помело")
+            assert cl_resp.status == 200
+            cl_data = await cl_resp.json()
+            assert cl_data["ok"] is True
+            assert cl_data["category"] == "Продукты"
+
+            # 8c. Receipt upload endpoint
+            import io
+            from PIL import Image
+            img = Image.new("RGB", (50, 50), color="white")
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG")
+            img_bytes = buf.getvalue()
+
+            from aiohttp import FormData
+            fd = FormData()
+            fd.add_field("file", img_bytes, filename="receipt.jpg", content_type="image/jpeg")
+            rc_resp = await client.post(f"/api/v1/{tok}/receipt", data=fd)
+            # пустая белая картинка не содержит суммы, поэтому 422
+            assert rc_resp.status == 422
+            rc_data = await rc_resp.json()
+            assert rc_data["ok"] is False
 
             # 9. Opening /app after 1-time auth uses persistent cookie automatically
             app_resp = await client.get("/app")

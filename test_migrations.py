@@ -136,13 +136,15 @@ def test_fresh_db_schema_equals_legacy_init_db(tmp_path):
     old, new = str(tmp_path / "old.db"), str(tmp_path / "new.db")
     init_legacy_schema(old)
     applied = migrations.migrate(new, TODAY, backup_dir=str(tmp_path / "bk"))
-    assert applied == [1, 2]
+    assert applied == [1, 2, 3]
     old_s, new_s = schema(old), schema(new)
     assert all(k in new_s for k in old_s)  # содержит все таблицы и индексы легаси
     assert ("table", "mandatory_payments") in new_s
     c = sqlite3.connect(new)
     assert c.execute("PRAGMA user_version").fetchone()[0] == migrations.SCHEMA_VERSION
     assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    cols = [r[1] for r in c.execute("PRAGMA table_info(expenses)")]
+    assert "comment" in cols
     c.close()
     # на пустой базе копию перед миграцией не делаем
     assert not os.path.exists(tmp_path / "bk")
@@ -153,10 +155,14 @@ def test_legacy_db_upgrades_without_data_loss(tmp_path):
     make_legacy_db(path)
     before = dump(path)
     applied = migrations.migrate(path, TODAY, backup_dir=str(tmp_path / "bk"))
-    assert applied == [1, 2]
+    assert applied == [1, 2, 3]
     after = dump(path)
     assert after.get("mandatory_payments") == []
-    assert {k: v for k, v in after.items() if k != "mandatory_payments"} == before  # ни одна строка легаси не изменилась
+    assert [r[:6] for r in after["expenses"]] == before["expenses"]
+    assert all(r[6] == "" for r in after["expenses"])
+    assert {k: v for k, v in after.items() if k not in ("mandatory_payments", "expenses")} == {
+        k: v for k, v in before.items() if k != "expenses"
+    }  # ни одна строка легаси не изменилась
     copies = os.listdir(tmp_path / "bk")
     assert len(copies) == 1 and copies[0].startswith(f"pre_migration_v0_to_v{migrations.SCHEMA_VERSION}_")
     assert dump(str(tmp_path / "bk" / copies[0])) == before  # копия содержит всё, что было
@@ -200,7 +206,7 @@ def test_new_migration_applies_and_keeps_data(tmp_path, monkeypatch):
     assert migrations.migrate(path, TODAY, backup_dir=str(tmp_path / "bk")) == [next_v]
     c = sqlite3.connect(path)
     assert c.execute("PRAGMA user_version").fetchone()[0] == next_v
-    rows = c.execute("SELECT id,user_id,spent_date,amount,category,created_at FROM expenses").fetchall()
+    rows = c.execute("SELECT id,user_id,spent_date,amount,category,created_at,comment FROM expenses").fetchall()
     assert sorted(rows, key=repr) == before["expenses"]
     c.close()
 
