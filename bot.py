@@ -2405,6 +2405,12 @@ async def show_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("_В этом месяце обычных трат пока нет_")
 
     lines.append(f"\n💸 *Всего потрачено (с учётом обязательных):* *{fmt_money(total_spent)}*")
+    if info.get("recalc_mode"):
+        rem_days = info["days_in_month"] - now_d.day
+        lines.append(f"🎯 *Лимит на сегодня:* {fmt_money(info['daily_limit'])}")
+        if rem_days > 0:
+            tomorrow_limit = get_budget_info(user_id, now_d + datetime.timedelta(days=1))["daily_limit"]
+            lines.append(f"🔄 *Лимит с завтра:* {fmt_money(tomorrow_limit)}/день ({rem_days} дн.)")
     lines.append(f"🪙 *Банк сдачи:* {fmt_money(change_pool)}")
     lines.append(f"💰 *Копилка (всего):* {fmt_money(info['piggy_total'])}")
 
@@ -3518,6 +3524,7 @@ async def post_init(app):
             BotCommand("week", "📆 Траты за 7 дней"),
             BotCommand("months", "📚 Архив прошлых месяцев"),
             BotCommand("undo", "↩️ Отменить последнюю операцию"),
+            BotCommand("recalc", "🔄 Перерасчёт лимита: вкл/выкл"),
             BotCommand("settings", "⚙️ Настройки бюджета"),
             BotCommand("help", "ℹ️ Справка и подсказки"),
         ])
