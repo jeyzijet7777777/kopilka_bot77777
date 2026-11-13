@@ -442,7 +442,8 @@ async def handle_post_receipt(request: web.Request) -> web.Response:
         reader = await request.multipart()
         field = await reader.next()
         while field:
-            if field.name in ("file", "receipt", "photo", "image"):
+            name = (field.name or "").lower()
+            if name in ("file", "receipt", "photo", "image") or field.filename:
                 image_bytes = await field.read()
                 break
             field = await reader.next()
@@ -1590,7 +1591,7 @@ async def handle_webapp(request: web.Request) -> web.Response:
   </div>
 
   <script>
-    const BASE_URL = "{base_url}";
+    const BASE_URL = (window.location && window.location.origin && window.location.origin !== "null") ? window.location.origin : "{base_url}";
     const SERVER_TOKEN = "{active_token}";
     const tg = window.Telegram ? window.Telegram.WebApp : null;
     if (tg) {{
@@ -1905,26 +1906,87 @@ async def handle_webapp(request: web.Request) -> web.Response:
     const inpReceipt = document.getElementById("inpReceipt");
     const receiptLoading = document.getElementById("receiptLoading");
 
+    async function compressImageIfNeeded(file) {{
+      if (!file || !file.type || !file.type.startsWith("image/") || file.size < 700 * 1024) {{
+        return file;
+      }}
+      return new Promise((resolve) => {{
+        const reader = new FileReader();
+        reader.onload = (e) => {{
+          const img = new Image();
+          img.onload = () => {{
+            const maxDim = 1920;
+            let width = img.width;
+            let height = img.height;
+            if (width > maxDim || height > maxDim) {{
+              if (width > height) {{
+                height = Math.round((height * maxDim) / width);
+                width = maxDim;
+              }} else {{
+                width = Math.round((width * maxDim) / height);
+                height = maxDim;
+              }}
+            }}
+            const canvas = document.createElement("canvas");
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0, width, height);
+            canvas.toBlob(
+              (blob) => {{
+                if (blob && blob.size < file.size) {{
+                  resolve(new File([blob], file.name || "receipt.jpg", {{ type: "image/jpeg" }}));
+                }} else {{
+                  resolve(file);
+                }}
+              }},
+              "image/jpeg",
+              0.88
+            );
+          }};
+          img.onerror = () => resolve(file);
+          img.src = e.target.result;
+        }};
+        reader.onerror = () => resolve(file);
+        reader.readAsDataURL(file);
+      }});
+    }}
+
     async function uploadReceiptFile(file) {{
       if (!file) return;
-      if (!currentToken) return;
+      if (!currentToken) {{
+        alert("Токен авторизации не найден. Попробуйте обновить страницу.");
+        return;
+      }}
 
       receiptLoading.style.display = "flex";
       if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred("medium");
 
-      const formData = new FormData();
-      formData.append("file", file);
-
       try {{
+        const processedFile = await compressImageIfNeeded(file);
+        const formData = new FormData();
+        formData.append("file", processedFile);
+
         const res = await fetch(`${{BASE_URL}}/api/v1/${{encodeURIComponent(currentToken)}}/receipt?save=1`, {{
           method: "POST",
           body: formData
         }});
-        const data = await res.json();
-        if (!data.ok) {{
-          alert(data.error || "Не удалось распознать изображение");
+
+        if (res.status === 413) {{
+          alert("Файл слишком большой. Попробуйте сделать фото ближе или с меньшим разрешением.");
           return;
         }}
+
+        let data = {{}};
+        try {{
+          data = await res.json();
+        }} catch (_) {{}}
+
+        if (!res.ok || !data.ok) {{
+          alert(data.error || ("Не удалось распознать изображение (код " + res.status + ")"));
+          return;
+        }}
+
         if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
         const p = data.parsed || {{}};
         const smartPreview = document.getElementById("smartPreview");
@@ -1939,7 +2001,8 @@ async def handle_webapp(request: web.Request) -> web.Response:
           await loadData();
         }}
       }} catch (err) {{
-        alert("Ошибка отправки изображения");
+        console.error("Upload receipt error:", err);
+        alert("Ошибка отправки изображения: " + (err.message || "проверьте сеть и повторите попытку"));
       }} finally {{
         receiptLoading.style.display = "none";
         inpReceipt.value = "";
@@ -2067,7 +2130,7 @@ async def handle_webapp(request: web.Request) -> web.Response:
 
 def create_widget_app() -> web.Application:
     """Создает и настраивает экземпляр aiohttp приложения."""
-    app = web.Application()
+    app = web.Application(client_max_size=30 * 1024 * 1024)
     app.router.add_options("/{tail:.*}", handle_options)
     app.router.add_get("/", handle_health)
     app.router.add_get("/health", handle_health)
