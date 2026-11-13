@@ -1514,9 +1514,9 @@ async def handle_webapp(request: web.Request) -> web.Response:
       <div class="add-box">
         <div class="box-title">
           <span>⚡️ Быстрая запись расхода</span>
-          <label for="inpReceipt" class="btn-receipt-upload" id="lblReceipt" title="Загрузить фото чека">
-            📷 Чек
-            <input type="file" id="inpReceipt" accept="image/*" capture="environment" style="display: none;">
+          <label for="inpReceipt" class="btn-receipt-upload" id="lblReceipt" title="Загрузить чек, скриншот перевода, историю покупок или фото записи">
+            📷 Чек / Фото
+            <input type="file" id="inpReceipt" accept="image/*" style="display: none;">
           </label>
         </div>
         <div class="smart-input-wrap">
@@ -1526,7 +1526,7 @@ async def handle_webapp(request: web.Request) -> web.Response:
           </div>
         </div>
         <div class="receipt-loading" id="receiptLoading" style="display: none;">
-          <span class="spinner"></span> Распознавание чека и QR-кода...
+          <span class="spinner"></span> Распознавание чека, перевода или фото...
         </div>
         <div class="chips" id="chipsBox">
           <div class="chip active" data-cat="Продукты">🛒 Продукты</div>
@@ -1901,12 +1901,11 @@ async def handle_webapp(request: web.Request) -> web.Response:
       if (e.key === "Enter") submitExpense();
     }});
 
-    // Загрузка фото чека с распознаванием
+    // Загрузка фото чека / перевода / записей с распознаванием
     const inpReceipt = document.getElementById("inpReceipt");
     const receiptLoading = document.getElementById("receiptLoading");
 
-    inpReceipt.addEventListener("change", async (e) => {{
-      const file = e.target.files && e.target.files[0];
+    async function uploadReceiptFile(file) {{
       if (!file) return;
       if (!currentToken) return;
 
@@ -1923,7 +1922,7 @@ async def handle_webapp(request: web.Request) -> web.Response:
         }});
         const data = await res.json();
         if (!data.ok) {{
-          alert(data.error || "Не удалось распознать чек");
+          alert(data.error || "Не удалось распознать изображение");
           return;
         }}
         if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
@@ -1931,7 +1930,8 @@ async def handle_webapp(request: web.Request) -> web.Response:
         const smartPreview = document.getElementById("smartPreview");
         const previewBadge = document.getElementById("previewBadge");
         smartPreview.style.display = "flex";
-        previewBadge.innerHTML = `✅ Чек: <b>${{p.amount}} ₽</b> · ${{p.comment || p.category}}`;
+        const label = p.method === "transfer" ? "💳 Перевод" : (p.method === "note" ? "📝 Запись" : (p.method === "store_app" ? "📱 Покупка" : "✅ Распознано"));
+        previewBadge.innerHTML = `${{label}}: <b>${{p.amount}} ₽</b> · ${{p.comment || p.category}}`;
         setTimeout(() => {{ smartPreview.style.display = "none"; }}, 4000);
         if (data.summary) {{
           renderSummary(data.summary);
@@ -1939,10 +1939,41 @@ async def handle_webapp(request: web.Request) -> web.Response:
           await loadData();
         }}
       }} catch (err) {{
-        alert("Ошибка отправки фото чека");
+        alert("Ошибка отправки изображения");
       }} finally {{
         receiptLoading.style.display = "none";
         inpReceipt.value = "";
+      }}
+    }}
+
+    inpReceipt.addEventListener("change", (e) => {{
+      const file = e.target.files && e.target.files[0];
+      if (file) uploadReceiptFile(file);
+    }});
+
+    // Вставка скриншота из буфера обмена (Ctrl+V)
+    window.addEventListener("paste", (e) => {{
+      const items = (e.clipboardData || window.clipboardData)?.items;
+      if (!items) return;
+      for (const item of items) {{
+        if (item.type && item.type.indexOf("image") !== -1) {{
+          const file = item.getAsFile();
+          if (file) {{
+            e.preventDefault();
+            uploadReceiptFile(file);
+            break;
+          }}
+        }}
+      }}
+    }});
+
+    // Перетаскивание файлов (Drag & Drop)
+    window.addEventListener("dragover", (e) => {{ e.preventDefault(); }});
+    window.addEventListener("drop", (e) => {{
+      e.preventDefault();
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0 && files[0].type.startsWith("image/")) {{
+        uploadReceiptFile(files[0]);
       }}
     }});
 

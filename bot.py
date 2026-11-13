@@ -2041,7 +2041,10 @@ def menu_hub_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📥 Скачать Excel", callback_data="menu_excel"),
         ],
         [
+            InlineKeyboardButton("📷 Сканировать чек / фото", callback_data="menu_scan_receipt"),
             InlineKeyboardButton("⚙️ Настройки бюджета", callback_data="menu_settings"),
+        ],
+        [
             InlineKeyboardButton("↩️ Отменить последнюю", callback_data="menu_undo"),
         ],
     ])
@@ -2131,6 +2134,7 @@ async def show_menu_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🏷 *Категории* — подробная разбивка расходов по статьям\n"
         "• 📱 *Виджеты & Web App* — для iOS (Scriptable, Команды) и Android (KWGT)\n"
         "• 📥 *Excel* — полная выгрузка персональной таблицы\n"
+        "• 📷 *Сканер* — фото чеков, квитанций, переводов и записей\n"
         "• ⚙️ *Настройки* — доходы, параметры лимита и компактный режим\n"
         "• ↩️ *Отмена* — быстрый откат последней добавленной траты\n\n"
         "💡 _Подсказка: чтобы записать трату, просто отправьте, например: `450 продукты`._"
@@ -2879,7 +2883,7 @@ async def restore_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption: str = ""):
     ensure_start_day(user_id)
-    status_msg = await msg.reply_text("🔍 Читаю чек, секунду...")
+    status_msg = await msg.reply_text("🔍 Распознаю чек / перевод / фото, секунду...")
     try:
         if hasattr(msg, "reply_chat_action"):
             try:
@@ -2895,11 +2899,13 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
 
         if not result or not result.get("success") or not result.get("amount"):
             await status_msg.edit_text(
-                "🤔 Не удалось распознать сумму или QR-код на чеке.\n\n"
-                "💡 Попробуйте:\n"
-                "• Сфотографировать чек при хорошем освещении\n"
-                "• Чтобы QR-код или строка «ИТОГО» были чётко видны\n"
-                "• Либо запишите трату текстом, например: `450 продукты`.",
+                "🤔 Не удалось распознать сумму на изображении.\n\n"
+                "💡 Вы можете отправить:\n"
+                "• 🧾 Кассовый чек (с QR-кодом или строкой «ИТОГО»)\n"
+                "• 💳 Скриншот перевода (СберБанк, Т-Банк, СБП, Альфа и др.)\n"
+                "• 📱 Скриншот истории покупок (Магнит, ВкусВилл, Самокат, Ozon)\n"
+                "• 📝 Фото блокнота или записи от руки (`Продукты 1200`)\n\n"
+                "Либо запишите трату текстом, например: `450 продукты`.",
                 parse_mode="Markdown",
             )
             return
@@ -2947,20 +2953,45 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
         ])
         report_text, markup = build_day_report(user_id, spent_d, extra_rows=chips)
 
-        merch_line = f"\n🏪 Магазин: *{esc(merchant)}*" if merchant else ""
+        if method == "qr":
+            method_title = "🧾 Чек успешно распознан (QR-код)!"
+            method_badge = "🧾 Чек (QR-код)"
+            merch_label = "🏪 Магазин"
+            items_label = "🛒 Товары"
+        elif method == "transfer":
+            method_title = "💳 Перевод успешно распознан!"
+            method_badge = "💳 Перевод"
+            merch_label = "👤 Получатель / Банк"
+            items_label = "📋 Детали"
+        elif method == "store_app":
+            method_title = "📱 Покупка в приложении распознана!"
+            method_badge = "📱 Покупка"
+            merch_label = "🏪 Магазин / Сервис"
+            items_label = "🛒 Детали"
+        elif method == "note":
+            method_title = "📝 Запись с бумаги распознана!"
+            method_badge = "📝 Запись"
+            merch_label = "✍️ Заметка"
+            items_label = "📋 Строки"
+        else:
+            method_title = "🧾 Чек успешно распознан!"
+            method_badge = "🧾 Чек"
+            merch_label = "🏪 Заведение / Магазин"
+            items_label = "🛒 Товары"
+
+        merch_line = f"\n{merch_label}: *{esc(merchant)}*" if merchant else ""
         items_line = ""
         if result.get("items"):
             preview = ", ".join(result["items"][:3])
             if len(result["items"]) > 3:
                 preview += "..."
-            items_line = f"\n🛒 Товары: _{esc(preview)}_"
+            items_line = f"\n{items_label}: _{esc(preview)}_"
 
-        method_name = "QR-код" if method == "qr" else "текст чека"
         compact_on = get_setting(user_id, "compact_mode", "0") == "1"
         if compact_on:
             rem = max(0.0, get_budget_info(user_id, spent_d)["daily_limit"] - (before + amount))
             compact_text = (
-                f"🧾 Чек ({method_name}): *{fmt_money(amount)}* — {esc(category)}{merch_line}\n"
+                f"{method_badge}: *{fmt_money(amount)}* — {esc(category)}{merch_line}\n"
                 f"📊 Остаток на сегодня: *{fmt_money(rem)}*\n{warning}"
             )
             compact_kb_rows = list(chips) if chips else []
@@ -2972,7 +3003,7 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
             )
         else:
             header = (
-                f"🧾 *Чек успешно распознан ({method_name})!*\n\n"
+                f"*{method_title}*\n\n"
                 f"💰 Сумма: *{fmt_money(amount)}*\n"
                 f"🏷 Категория: *{esc(category)}*\n"
                 f"📅 Дата: *{spent_d.strftime('%d.%m.%Y')}*"
@@ -4170,6 +4201,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await undo_last(update, context)
         return
 
+    elif data == "menu_scan_receipt":
+        await query.answer()
+        text = (
+            "📷 *Распознавание чеков, переводов и фото трат*\n\n"
+            "Отправьте боту изображение в чат:\n"
+            "• 🧾 *Кассовый чек* — QR-код или итоговая сумма распознаются автоматически\n"
+            "• 💳 *Скриншот перевода* — СберБанк, Т-Банк, СБП, Альфа и др. (сумма, получатель, банк)\n"
+            "• 📱 *История покупок* — Магнит, ВкусВилл, Самокат, Ozon, Wildberries\n"
+            "• 📝 *Записи на бумаге* — фото блокнота или листа (`Продукты 1200`, `Такси 450`)\n\n"
+            "💡 _Вы можете прикрепить фото или отправить как файл (без сжатия). "
+            "К фото можно добавить подпись с комментарием или категорией!_"
+        )
+        msg_target = query.message or update.effective_message
+        if msg_target:
+            await msg_target.reply_text(text, parse_mode="Markdown")
+        return
+
+
+async def scan_receipt_info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📷 *Распознавание чеков, переводов и фото трат*\n\n"
+        "Отправьте боту изображение в чат:\n"
+        "• 🧾 *Кассовый чек* — QR-код или итоговая сумма распознаются автоматически\n"
+        "• 💳 *Скриншот перевода* — СберБанк, Т-Банк, СБП, Альфа и др. (сумма, получатель, банк)\n"
+        "• 📱 *История покупок* — Магнит, ВкусВилл, Самокат, Ozon, Wildberries\n"
+        "• 📝 *Записи на бумаге* — фото блокнота или листа (`Продукты 1200`, `Такси 450`)\n\n"
+        "💡 _Вы можете прикрепить фото или отправить как файл (без сжатия). "
+        "К фото можно добавить подпись с комментарием или категорией!_"
+    )
+    await _msg(update).reply_text(text, parse_mode="Markdown")
+
 
 # --- Текстовые сообщения ---
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4788,6 +4850,7 @@ def main():
     app.add_handler(CommandHandler("widget", show_widgets_info))
     app.add_handler(CommandHandler("widgets", show_widgets_info))
     app.add_handler(CommandHandler("app", show_app_cmd))
+    app.add_handler(CommandHandler(["receipt", "scan", "check"], scan_receipt_info_cmd))
     app.add_handler(CommandHandler("menu", show_menu_hub))
     app.add_handler(CommandHandler("help", help_cmd))
 

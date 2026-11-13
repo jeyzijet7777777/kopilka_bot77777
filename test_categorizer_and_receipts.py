@@ -536,4 +536,184 @@ def test_history_and_excel_show_item_description(clean_db):
     assert any("Продукты (Помело): 280₽" in str(v) for v in h_vals)
 
 
+def test_extract_russian_textual_and_relative_dates():
+    from kopilka.services.receipt_scanner import _extract_date_from_text
+    today = datetime.date.today()
+    assert _extract_date_from_text("Чек от 08.11.2026 14:30") == datetime.date(2026, 11, 8)
+    assert _extract_date_from_text("Покупка 8 ноября 2026 года") == datetime.date(2026, 11, 8)
+    assert _extract_date_from_text("Заказ от 5 мая 2026") == datetime.date(2026, 5, 5)
+    assert _extract_date_from_text("Перевод отправлен вчера в 15:00") == today - datetime.timedelta(days=1)
+    assert _extract_date_from_text("Списание сегодня 12:00") == today
+
+
+def test_bank_transfer_recognition():
+    from kopilka.services.receipt_scanner import _find_transfer_details, _extract_amount_and_notes
+    lines_sber = [
+        "СберБанк",
+        "Чек по операции",
+        "Перевод клиенту СберБанка",
+        "Исполнен",
+        "1 500 ₽",
+        "Комиссия",
+        "0 ₽",
+        "Получатель",
+        "Иван Иванович К.",
+        "08.11.2026",
+    ]
+    t_info = _find_transfer_details(lines_sber, " ".join(lines_sber))
+    assert t_info is not None
+    assert t_info["is_transfer"] is True
+    assert t_info["recipient"] == "Иван Иванович К."
+
+    amt, _ = _extract_amount_and_notes(lines_sber)
+    assert amt == 1500.0
+
+    lines_tbank = [
+        "Т-Банк",
+        "Перевод по СБП",
+        "Успешно",
+        "-850 ₽",
+        "Получателю",
+        "Анна С.",
+        "Сообщение",
+        "За обед в кафе",
+    ]
+    t_info_t = _find_transfer_details(lines_tbank, " ".join(lines_tbank))
+    assert t_info_t is not None
+    assert t_info_t["recipient"] == "Анна С."
+    assert t_info_t["comment"] == "За обед в кафе"
+
+    amt_t, _ = _extract_amount_and_notes(lines_tbank)
+    assert amt_t == 850.0
+
+
+def test_store_app_purchase_history_recognition():
+    from kopilka.services.receipt_scanner import _extract_amount_and_notes, _find_merchant_in_text
+    lines_magnit = [
+        "История покупок",
+        "Магнит у дома",
+        "ул. Ленина, 45",
+        "8 ноября 2026, 18:24",
+        "1 240,50 ₽",
+        "Оплачено картой",
+        "Начислено 12 бонусов",
+    ]
+    merchant, cat = _find_merchant_in_text(" ".join(lines_magnit))
+    assert merchant == "Магнит"
+    assert cat == "Продукты"
+
+    amt, _ = _extract_amount_and_notes(lines_magnit)
+    assert amt == 1240.5
+
+
+def test_paper_notes_recognition():
+    from kopilka.services.receipt_scanner import _extract_amount_and_notes
+    lines_notes = [
+        "Продукты 1200",
+        "Такси 450",
+    ]
+    amt, items = _extract_amount_and_notes(lines_notes)
+    assert amt == 1650.0
+    assert len(items) == 2
+
+    lines_single = ["Помело 280"]
+    amt_s, items_s = _extract_amount_and_notes(lines_single)
+    assert amt_s == 280.0
+    assert len(items_s) == 1
+
+
+def test_scan_receipt_image_transfer_and_app_mock(monkeypatch):
+    import kopilka.services.receipt_scanner as rs
+    # Mock RapidOCR to simulate bank transfer image
+    fake_sber_lines = [
+        (None, "СберБанк"),
+        (None, "Чек по операции"),
+        (None, "Перевод клиенту СберБанка"),
+        (None, "1 500 ₽"),
+        (None, "Комиссия 0 ₽"),
+        (None, "Получатель: Иван И."),
+        (None, "08.11.2026"),
+    ]
+    monkeypatch.setattr(rs, "get_ocr", lambda: (lambda b: (fake_sber_lines, None)))
+    dummy_img = Image.new("RGB", (100, 100), color="white")
+    buf = io.BytesIO()
+    dummy_img.save(buf, format="JPEG")
+    res = rs.scan_receipt_image(buf.getvalue(), user_id=1)
+    assert res["success"] is True
+    assert res["amount"] == 1500.0
+    assert res["method"] == "transfer"
+    assert "Иван И." in res["merchant"]
+
+    # Mock RapidOCR to simulate store app screenshot
+    fake_magnit_lines = [
+        (None, "История покупок"),
+        (None, "Магнит у дома"),
+        (None, "1 240,50 ₽"),
+        (None, "8 ноября 2026"),
+    ]
+    monkeypatch.setattr(rs, "get_ocr", lambda: (lambda b: (fake_magnit_lines, None)))
+    res_m = rs.scan_receipt_image(buf.getvalue(), user_id=1)
+    assert res_m["success"] is True
+    assert res_m["amount"] == 1240.5
+    assert res_m["method"] == "store_app"
+    assert res_m["category"] == "Продукты"
+
+    # Mock RapidOCR to simulate handwritten note on paper
+    fake_note_lines = [
+        (None, "Продукты 1200"),
+        (None, "Такси 450"),
+    ]
+    monkeypatch.setattr(rs, "get_ocr", lambda: (lambda b: (fake_note_lines, None)))
+    res_n = rs.scan_receipt_image(buf.getvalue(), user_id=1)
+    assert res_n["success"] is True
+    assert res_n["amount"] == 1650.0
+    assert res_n["method"] == "note"
+
+
+def test_bot_process_receipt_bytes_transfer_and_menu(clean_db, monkeypatch):
+    import kopilka.services.receipt_scanner as rs
+    uid = 1
+    dummy_img = Image.new("RGB", (100, 100), color="white")
+    buf = io.BytesIO()
+    dummy_img.save(buf, format="JPEG")
+    img_bytes = buf.getvalue()
+
+    fake_transfer = {
+        "success": True,
+        "amount": 1500.0,
+        "spent_date": datetime.date(2026, 11, 8),
+        "merchant": "Перевод: Иван И.",
+        "category": "Разное",
+        "method": "transfer",
+        "items": ["Кому: Иван И."],
+    }
+    monkeypatch.setattr(bot, "scan_receipt_image", lambda *a, **kw: fake_transfer)
+
+    msg = FakeMessage()
+    run(bot._process_receipt_bytes(msg, uid, img_bytes, ""))
+
+    assert len(msg.edits) > 0
+    assert "Перевод успешно распознан" in msg.edits[0][0]
+    assert "1 500" in msg.edits[0][0]
+
+    with db() as conn:
+        row = conn.execute("SELECT amount, category, comment FROM expenses WHERE user_id = 1").fetchone()
+        assert row["amount"] == 1500.0
+        assert "Иван И." in row["comment"]
+
+    # Проверяем кнопку и команду вызова сканера
+    upd_cb, msg_cb = make_update(uid=uid, data="menu_scan_receipt")
+    upd_cb.message = None
+    upd_cb.effective_message = msg_cb
+    run(bot.callback_handler(upd_cb, make_ctx()))
+    assert len(msg_cb.replies) == 1
+    assert "Распознавание чеков" in msg_cb.replies[0][0]
+
+    upd_cmd, msg_cmd = make_update(uid=uid, text="/receipt")
+    run(bot.scan_receipt_info_cmd(upd_cmd, make_ctx()))
+    assert len(msg_cmd.replies) == 1
+    assert "Распознавание чеков" in msg_cmd.replies[0][0]
+
+
+
 

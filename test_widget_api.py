@@ -164,6 +164,29 @@ def test_widget_http_endpoints(env):
             rc_data = await rc_resp.json()
             assert rc_data["ok"] is False
 
+            # 8d. Successful transfer/receipt upload with mock
+            import datetime
+            from unittest.mock import patch
+            fake_scan = {
+                "success": True,
+                "amount": 1500.0,
+                "spent_date": datetime.date.today(),
+                "merchant": "Перевод: Иван И.",
+                "category": "Разное",
+                "method": "transfer",
+                "items": ["Кому: Иван И."],
+            }
+            with patch("kopilka.services.receipt_scanner.scan_receipt_image", return_value=fake_scan):
+                fd_ok = FormData()
+                fd_ok.add_field("file", img_bytes, filename="transfer.jpg", content_type="image/jpeg")
+                rc_ok_resp = await client.post(f"/api/v1/{tok}/receipt", data=fd_ok)
+                assert rc_ok_resp.status == 200
+                rc_ok_data = await rc_ok_resp.json()
+                assert rc_ok_data["ok"] is True
+                assert rc_ok_data["saved"] is True
+                assert rc_ok_data["parsed"]["amount"] == 1500.0
+                assert "Иван И." in rc_ok_data["parsed"]["comment"]
+
             # 9. Opening /app after 1-time auth uses persistent cookie automatically
             app_resp = await client.get("/app")
             assert app_resp.status == 200
