@@ -715,5 +715,43 @@ def test_bot_process_receipt_bytes_transfer_and_menu(clean_db, monkeypatch):
     assert "Распознавание чеков" in msg_cmd.replies[0][0]
 
 
+def test_marketplace_product_card_recognition(monkeypatch):
+    import kopilka.services.receipt_scanner as rs
+    fake_ozon_lines = [
+        (None, "50x70"),
+        (None, "GALTEX"),
+        (None, "ПОДУШКИ"),
+        (None, "891D"),
+        (None, "2432P-63%"),
+        (None, "ozon"),
+        (None, "В корзину"),
+    ]
+    monkeypatch.setattr(rs, "get_ocr", lambda: (lambda b: (fake_ozon_lines, None)))
+    dummy_img = Image.new("RGB", (100, 100), color="white")
+    buf = io.BytesIO()
+    dummy_img.save(buf, format="JPEG")
+    res = rs.scan_receipt_image(buf.getvalue(), user_id=1)
+    assert res["success"] is True
+    assert res["amount"] == 891.0
+    assert res["merchant"] == "Ozon"
+    assert res["method"] == "marketplace"
+    assert res["category"] == "Покупки"
+
+    fake_wb_lines = [
+        (None, "Wildberries"),
+        (None, "Комплект постельного белья"),
+        (None, "1 390 ₽"),
+        (None, "4 200 ₽ -67%"),
+        (None, "В корзину"),
+    ]
+    monkeypatch.setattr(rs, "get_ocr", lambda: (lambda b: (fake_wb_lines, None)))
+    res_wb = rs.scan_receipt_image(buf.getvalue(), user_id=1)
+    assert res_wb["success"] is True
+    assert res_wb["amount"] == 1390.0
+    assert res_wb["merchant"] == "Wildberries"
+    assert res_wb["method"] == "marketplace"
+
+
+
 
 

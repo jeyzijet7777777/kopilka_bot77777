@@ -528,7 +528,29 @@ def get_budget_info(user_id: int, ref_date: datetime.date = None):
             first_counted_day = sd.day
     except ValueError:
         pass
-    series = _month_limit_series(limit_base, days_in_month, limit_snaps, first_counted_day, ref_date.day)
+
+    recalc_mode = get_setting(user_id, "recalc_mode", "0") == "1"
+    if recalc_mode:
+        with db() as conn:
+            exp_rows = conn.execute(
+                "SELECT spent_date, SUM(amount) AS total FROM expenses "
+                "WHERE user_id = ? AND spent_date LIKE ? GROUP BY spent_date",
+                (user_id, month_prefix + "%"),
+            ).fetchall()
+        expenses_by_day = {int(r["spent_date"].split("-")[2]): float(r["total"]) for r in exp_rows}
+        today_day = today.day if (ref_date.year, ref_date.month) == (today.year, today.month) else None
+        series = _month_limit_series_dynamic(
+            base=limit_base,
+            n=days_in_month,
+            snaps=limit_snaps,
+            first_day=first_counted_day,
+            last_day=ref_date.day,
+            expenses_by_day=expenses_by_day,
+            today_day=today_day,
+        )
+    else:
+        series = _month_limit_series(limit_base, days_in_month, limit_snaps, first_counted_day, ref_date.day)
+
     daily_limit = series.get(ref_date.day, max(0.0, limit_base))
 
     return {
@@ -550,6 +572,7 @@ def get_budget_info(user_id: int, ref_date: datetime.date = None):
         "limit_base": limit_base,
         "limit_snaps": limit_snaps,
         "first_counted_day": first_counted_day,
+        "recalc_mode": recalc_mode,
     }
 
 
@@ -568,17 +591,81 @@ def _month_limit_series(base: float, n: int, snaps: dict, first_day: int, last_d
     return out
 
 
+def _month_limit_series_dynamic(
+    base: float,
+    n: int,
+    snaps: dict,
+    first_day: int,
+    last_day: int,
+    expenses_by_day: dict,
+    today_day: int = None,
+) -> dict:
+    """Динамический перерасчёт лимита: перерасход или экономия автоматически
+    перераспределяются поровну на оставшиеся дни месяца."""
+    accounted_budget = base * max(1, n - first_day + 1)
+    rem_budget = accounted_budget
+    out = {}
+
+    sim_end = max(last_day, today_day if today_day is not None else 1, n)
+    future_lim = None
+
+    for dn in range(first_day, sim_end + 1):
+        if dn in snaps:
+            lim = snaps[dn]
+        elif today_day is not None and dn > today_day:
+            if future_lim is None:
+                rem_days = max(1, n - today_day)
+                future_lim = max(0.0, rem_budget / rem_days)
+            lim = future_lim
+        else:
+            rem_days = max(1, n - dn + 1)
+            lim = max(0.0, rem_budget / rem_days)
+
+        out[dn] = lim
+
+        if today_day is None or dn < today_day:
+            rem_budget -= expenses_by_day.get(dn, 0.0)
+        elif dn == today_day:
+            rem_budget -= expenses_by_day.get(dn, 0.0)
+            rem_days = max(1, n - today_day)
+            future_lim = max(0.0, rem_budget / rem_days)
+
+    return {k: v for k, v in out.items() if first_day <= k <= last_day}
+
+
 def limits_between(user_id: int, start: datetime.date, end: datetime.date) -> dict:
     """{дата: лимит} для диапазона дат (дни до начала учёта в результат не попадают)."""
     out = {}
     cur = start.replace(day=1)
+    today = today_date()
+    recalc_mode = get_setting(user_id, "recalc_mode", "0") == "1"
     while cur <= end:
         last_dn = calendar.monthrange(cur.year, cur.month)[1]
         info = get_budget_info(user_id, cur)
-        series = _month_limit_series(
-            info["limit_base"], info["days_in_month"], info["limit_snaps"],
-            info["first_counted_day"], last_dn,
-        )
+        if recalc_mode:
+            month_prefix = f"{cur.year:04d}-{cur.month:02d}-"
+            with db() as conn:
+                exp_rows = conn.execute(
+                    "SELECT spent_date, SUM(amount) AS total FROM expenses "
+                    "WHERE user_id = ? AND spent_date LIKE ? GROUP BY spent_date",
+                    (user_id, month_prefix + "%"),
+                ).fetchall()
+            expenses_by_day = {int(r["spent_date"].split("-")[2]): float(r["total"]) for r in exp_rows}
+            today_day = today.day if (cur.year, cur.month) == (today.year, today.month) else None
+            series = _month_limit_series_dynamic(
+                base=info["limit_base"],
+                n=info["days_in_month"],
+                snaps=info["limit_snaps"],
+                first_day=info["first_counted_day"],
+                last_day=last_dn,
+                expenses_by_day=expenses_by_day,
+                today_day=today_day,
+            )
+        else:
+            series = _month_limit_series(
+                info["limit_base"], info["days_in_month"], info["limit_snaps"],
+                info["first_counted_day"], last_dn,
+            )
         for dn, lim in series.items():
             out[datetime.date(cur.year, cur.month, dn)] = lim
         cur = (cur.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
@@ -1058,11 +1145,13 @@ def settings_inline_kb(user_id: int):
     auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
     ask_cat_on = get_setting(user_id, "ask_cat_on_num", "0") != "0"
     compact_on = get_setting(user_id, "compact_mode", "0") == "1"
+    recalc_on = get_setting(user_id, "recalc_mode", "0") == "1"
     mode_label = INCOME_MODE_SHORT.get(info["income_mode"], info["income_mode"])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🏦 Доход: {fmt_money(info['raw_income'])} ({mode_label})", callback_data="set_daily_income")],
         [InlineKeyboardButton("🔄 Изменить график получения дохода", callback_data="set_income_mode")],
         [InlineKeyboardButton(f"📅 Дней в месяце: {days_label}", callback_data="set_days_count")],
+        [InlineKeyboardButton(f"🔄 Перерасчёт лимита: {'вкл' if recalc_on else 'выкл'}", callback_data="toggle_recalc_mode")],
         [InlineKeyboardButton(f"⏰ Время отчёта, {TZ_LABEL} (сейчас {reminder_time})", callback_data="set_reminder_time")],
         [InlineKeyboardButton(f"💬 Компактные ответы: {'вкл' if compact_on else 'выкл'}", callback_data="toggle_compact_mode")],
         [InlineKeyboardButton("📱 Виджеты (iOS / Android) & Web App", callback_data="open_widgets_hub")],
@@ -1095,15 +1184,24 @@ def build_settings_text(user_id: int) -> str:
     reminder_time = get_setting(user_id, "reminder_time", "21:00")
     days_mode = "авто по календарю" if not info["is_custom_days"] else "ручной выбор"
 
+    recalc_on = get_setting(user_id, "recalc_mode", "0") == "1"
+    model_name = "🔄 Динамический перерасчёт" if recalc_on else "🏦 Фиксированный лимит"
+    recalc_desc = (
+        "перерасчёт при перерасходе/экономии"
+        if recalc_on
+        else "стабильный лимит, разница в банк сдачи"
+    )
+
     text = (
-        "⚙️ *Настройки бюджета (🏦 Умная модель)*\n\n"
+        f"⚙️ *Настройки бюджета ({model_name})*\n\n"
         f"🏦 *Доход:* {fmt_money(info['raw_income'])} ({info['display_income_text']})\n"
         f"📅 *Дней в месяце:* {info['days_in_month']} ({days_mode})\n"
+        f"🔄 *Модель расчёта:* {model_name} ({recalc_desc})\n"
         f"⏰ *Вечерний авто-отчёт:* в {reminder_time} ({TZ_LABEL})\n"
         f"🏠 *Обязательные расходы ({fmt_money(info['mandatory_total'])}):*\n{mand_block}\n\n"
         f"💰 *Плановая копилка:* {fmt_money(info['save'])}{topup_str}\n"
         f"🏦 *Копилка (всего накоплено):* {fmt_money(info['piggy_total'])}\n"
-        f"🎯 *Чистый лимит на день:* *{fmt_money(info['daily_limit'])}*\n"
+        f"🎯 *Чистый лимит на сегодня:* *{fmt_money(info['daily_limit'])}*\n"
     )
     if info["available"] < 0:
         text += (
@@ -1145,17 +1243,55 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
     else:
         exp_text = "_Пока нет записанных трат_"
 
-    if rem < 0:
-        status_line = f"⚠️ *ЛИМИТ ПРЕВЫШЕН на {fmt_money(-rem)}!*"
-        if change_pool >= 0:
-            advice = "💡 Перерасход покрыт накопленной сдачей."
+    if info.get("recalc_mode"):
+        rem_days = info["days_in_month"] - target_date.day
+        tomorrow_limit = 0.0
+        if target_date == today_date() and rem_days > 0:
+            tomorrow_date = target_date + datetime.timedelta(days=1)
+            tomorrow_limit = get_budget_info(user_id, tomorrow_date)["daily_limit"]
+
+        if target_date == today_date():
+            if rem < 0:
+                status_line = f"⚠️ *ЛИМИТ ПРЕВЫШЕН на {fmt_money(-rem)}!*"
+                if rem_days > 0:
+                    advice = f"🔄 *Бюджет пересчитан:* из-за перерасхода лимит на оставшиеся {rem_days} дн. уменьшен до *{fmt_money(tomorrow_limit)}/день*."
+                else:
+                    advice = "💡 Это последний день месяца. Завтра начнётся новый бюджетный период."
+            elif rem > 0:
+                status_line = f"✅ *Остаток на сегодня:* +{fmt_money(rem)}"
+                if rem_days > 0:
+                    advice = f"🔄 *Бюджет пересчитан:* остаток перераспределён на оставшиеся {rem_days} дн. — новый лимит *{fmt_money(tomorrow_limit)}/день*."
+                else:
+                    advice = f"🎉 Месяц завершён с экономией {fmt_money(rem)}!"
+            else:
+                status_line = "✅ *Лимит потрачен ровно:* 0 ₽ остатка"
+                if rem_days > 0:
+                    advice = f"🔄 *Бюджет в графике:* лимит на оставшиеся {rem_days} дн. остаётся *{fmt_money(tomorrow_limit)}/день*."
+                else:
+                    advice = "💡 Месяц завершён ровно по плану!"
         else:
-            advice = "💡 Банк сдачи ушёл в минус. Попробуйте завтра потратить меньше."
+            if rem < 0:
+                status_line = f"⚠️ *ЛИМИТ ПРЕВЫШЕН на {fmt_money(-rem)}!*"
+                advice = "💡 Перерасход был учтён в бюджетах последующих дней."
+            else:
+                status_line = f"✅ *Остаток за день:* +{fmt_money(rem)}"
+                advice = "💡 Сэкономленные средства перешли в бюджет следующих дней."
     else:
-        status_line = f"✅ *Остаток сдачи за день:* +{fmt_money(rem)}"
-        advice = f"💡 Сдача (+{fmt_money(rem)}) добавлена в ваш банк сдачи."
+        if rem < 0:
+            status_line = f"⚠️ *ЛИМИТ ПРЕВЫШЕН на {fmt_money(-rem)}!*"
+            if change_pool >= 0:
+                advice = "💡 Перерасход покрыт накопленной сдачей."
+            else:
+                advice = "💡 Банк сдачи ушёл в минус. Попробуйте завтра потратить меньше."
+        else:
+            status_line = f"✅ *Остаток сдачи за день:* +{fmt_money(rem)}"
+            advice = f"💡 Сдача (+{fmt_money(rem)}) добавлена в ваш банк сдачи."
 
     base_daily_income = info["income"] / info["days_in_month"] if info["days_in_month"] else 0.0
+
+    recalc_line = ""
+    if info.get("recalc_mode") and target_date == today_date() and rem_days > 0:
+        recalc_line = f"🔄 *Лимит с завтра:* {fmt_money(tomorrow_limit)}/день ({rem_days} дн.)\n"
 
     text = (
         f"{title}\n\n"
@@ -1164,6 +1300,7 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
         f"💸 *Потрачено за день:* {fmt_money(spent)} из {fmt_money(info['daily_limit'])}\n"
         f"{status_line}\n\n"
         f"{advice}\n\n"
+        f"{recalc_line}"
         f"🪙 *Банк сдачи:* {fmt_money(change_pool)}\n"
         f"💰 *Копилка (всего):* {fmt_money(info['piggy_total'])}"
     )
@@ -2169,6 +2306,28 @@ async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def recalc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cur = get_setting(user_id, "recalc_mode", "0")
+    new_val = "1" if cur != "1" else "0"
+    set_setting(user_id, "recalc_mode", new_val)
+    info = get_budget_info(user_id)
+    if new_val == "1":
+        msg = (
+            "🔄 *Динамический перерасчёт лимита включён!*\n\n"
+            "Теперь, если вы потратите больше или меньше запланированного, бот автоматически перерасчитает "
+            "дневной лимит на все оставшиеся дни месяца, чтобы вы уложились в бюджет.\n\n"
+            f"🎯 *Текущий лимит на сегодня:* *{fmt_money(info['daily_limit'])}*"
+        )
+    else:
+        msg = (
+            "🏦 *Фиксированный лимит включён!*\n\n"
+            "Лимит стабилен каждый день, а вся экономия или перерасход накапливаются в «Банке сдачи».\n\n"
+            f"🎯 *Лимит на день:* *{fmt_money(info['limit_base'])}*"
+        )
+    await _msg(update).reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KB)
+
+
 async def show_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     end_d = today_date()
@@ -2963,6 +3122,11 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
             method_badge = "💳 Перевод"
             merch_label = "👤 Получатель / Банк"
             items_label = "📋 Детали"
+        elif method == "marketplace":
+            method_title = "🛍 Товар на маркетплейсе распознан!"
+            method_badge = "🛍 Заказ"
+            merch_label = "🏪 Маркетплейс"
+            items_label = "🛒 Товар / Детали"
         elif method == "store_app":
             method_title = "📱 Покупка в приложении распознана!"
             method_badge = "📱 Покупка"
@@ -2989,10 +3153,21 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
 
         compact_on = get_setting(user_id, "compact_mode", "0") == "1"
         if compact_on:
-            rem = max(0.0, get_budget_info(user_id, spent_d)["daily_limit"] - (before + amount))
+            b_info = get_budget_info(user_id, spent_d)
+            rem_raw = b_info["daily_limit"] - (before + amount)
+            rem = max(0.0, rem_raw)
+            recalc_hint = ""
+            if b_info.get("recalc_mode") and spent_d == today_date():
+                rem_days = b_info["days_in_month"] - spent_d.day
+                if rem_days > 0:
+                    tomorrow_lim = get_budget_info(user_id, spent_d + datetime.timedelta(days=1))["daily_limit"]
+                    if rem_raw < 0:
+                        recalc_hint = f"\n⚠️ *Лимит превышен на {fmt_money(-rem_raw)}!*\n🔄 Новый лимит с завтра: *{fmt_money(tomorrow_lim)}/день*"
+                    else:
+                        recalc_hint = f" · с завтра: ~{fmt_money(tomorrow_lim)}"
             compact_text = (
                 f"{method_badge}: *{fmt_money(amount)}* — {esc(category)}{merch_line}\n"
-                f"📊 Остаток на сегодня: *{fmt_money(rem)}*\n{warning}"
+                f"📊 Остаток на сегодня: *{fmt_money(rem)}*{recalc_hint}\n{warning}"
             )
             compact_kb_rows = list(chips) if chips else []
             compact_kb_rows.append([InlineKeyboardButton("📊 Полный отчёт дня", callback_data=f"show_full_day_{spent_d.isoformat()}")])
@@ -3275,7 +3450,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Расходы по категориям и месяцам: /categories. Графики прошлых месяцев: /chart, кнопки ◀️ ▶️.\n\n"
         "Бот предупредит, когда потрачено 80% дневного лимита, и по понедельникам пришлёт итоги недели; "
         "1-го числа — итоги месяца (всё отключается в /settings).\n"
-        "Команды: /today /week /month /months /history /categories /chart /excel /piggy /settings /undo /cancel",
+        "В /settings или командой /recalc можно переключать режим бюджета: фиксированный (со сдачей) "
+        "или динамический (перерасчёт лимита при перерасходе или экономии).\n\n"
+        "Команды: /today /week /month /months /history /categories /chart /excel /piggy /recalc /settings /undo /cancel",
         parse_mode="Markdown",
         reply_markup=MAIN_KB,
     )
@@ -3785,6 +3962,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_setting(user_id, "compact_mode", new_val)
         status = "включены (короткий аккуратный ответ при записи)" if new_val == "1" else "выключены (полный дневной отчёт)"
         await query.message.reply_text(f"💬 Компактные ответы: *{status}*.", parse_mode="Markdown")
+        await refresh_settings(query, user_id)
+
+    elif data == "toggle_recalc_mode":
+        cur = get_setting(user_id, "recalc_mode", "0")
+        new_val = "1" if cur != "1" else "0"
+        set_setting(user_id, "recalc_mode", new_val)
+        if new_val == "1":
+            status = "включён (перерасход и экономия перераспределяются на оставшиеся дни месяца)"
+        else:
+            status = "выключен (лимит каждого дня стабилен, разница копится в банке сдачи)"
+        await query.message.reply_text(f"🔄 Динамический перерасчёт лимита: *{status}*.", parse_mode="Markdown")
         await refresh_settings(query, user_id)
 
     elif data in ["open_widgets_hub", "menu_widgets"]:
@@ -4640,10 +4828,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         merch_str = f" ({esc(merchant)})" if merchant else ""
         compact_on = get_setting(user_id, "compact_mode", "0") == "1"
         if compact_on:
-            rem = max(0.0, get_budget_info(user_id, spent_d)["daily_limit"] - (before + amount))
+            b_info = get_budget_info(user_id, spent_d)
+            rem_raw = b_info["daily_limit"] - (before + amount)
+            rem = max(0.0, rem_raw)
+            recalc_hint = ""
+            if b_info.get("recalc_mode") and spent_d == today_date():
+                rem_days = b_info["days_in_month"] - spent_d.day
+                if rem_days > 0:
+                    tomorrow_lim = get_budget_info(user_id, spent_d + datetime.timedelta(days=1))["daily_limit"]
+                    if rem_raw < 0:
+                        recalc_hint = f"\n⚠️ *Лимит превышен на {fmt_money(-rem_raw)}!*\n🔄 Новый лимит с завтра: *{fmt_money(tomorrow_lim)}/день*"
+                    else:
+                        recalc_hint = f" · с завтра: ~{fmt_money(tomorrow_lim)}"
             compact_text = (
                 f"🧾 Оплата: *{fmt_money(amount)}* — {esc(category)}{merch_str}\n"
-                f"📊 Остаток на сегодня: *{fmt_money(rem)}*\n{warning}"
+                f"📊 Остаток на сегодня: *{fmt_money(rem)}*{recalc_hint}\n{warning}"
             )
             compact_kb_rows = list(chips) if chips else []
             compact_kb_rows.append([InlineKeyboardButton("📊 Полный отчёт дня", callback_data=f"show_full_day_{spent_d.isoformat()}")])
@@ -4751,10 +4950,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     report_text, markup = build_day_report(user_id, spent_d, extra_rows=extra)
     compact_on = get_setting(user_id, "compact_mode", "0") == "1"
     if compact_on:
-        rem = max(0.0, get_budget_info(user_id, spent_d)["daily_limit"] - (before + amount))
+        b_info = get_budget_info(user_id, spent_d)
+        rem_raw = b_info["daily_limit"] - (before + amount)
+        rem = max(0.0, rem_raw)
+        recalc_hint = ""
+        if b_info.get("recalc_mode") and spent_d == today_date():
+            rem_days = b_info["days_in_month"] - spent_d.day
+            if rem_days > 0:
+                tomorrow_lim = get_budget_info(user_id, spent_d + datetime.timedelta(days=1))["daily_limit"]
+                if rem_raw < 0:
+                    recalc_hint = f"\n⚠️ *Лимит превышен на {fmt_money(-rem_raw)}!*\n🔄 Новый лимит с завтра: *{fmt_money(tomorrow_lim)}/день*"
+                else:
+                    recalc_hint = f" · с завтра: ~{fmt_money(tomorrow_lim)}"
         compact_text = (
             f"✅ Записано: *{fmt_money(amount)}* — {esc(category)} ({spent_d.strftime('%d.%m')}){note_hint}\n"
-            f"📊 Остаток на сегодня: *{fmt_money(rem)}*\n{warning}"
+            f"📊 Остаток на сегодня: *{fmt_money(rem)}*{recalc_hint}\n{warning}"
         )
         compact_kb_rows = list(extra) if extra else []
         compact_kb_rows.append([InlineKeyboardButton("📊 Полный отчёт дня", callback_data=f"show_full_day_{spent_d.isoformat()}")])
@@ -4839,6 +5049,7 @@ def main():
     app.add_handler(CommandHandler("chart", send_chart))
     app.add_handler(CommandHandler("excel", send_excel))
     app.add_handler(CommandHandler("settings", show_settings))
+    app.add_handler(CommandHandler(["recalc", "mode"], recalc_cmd))
     app.add_handler(CommandHandler("undo", undo_last))
     app.add_handler(CommandHandler("piggy", show_piggy))
     app.add_handler(CommandHandler("history", show_history))

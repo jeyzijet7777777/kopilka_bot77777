@@ -127,8 +127,13 @@ KNOWN_STORES = [
     ("Леруа Мерлен", ["леруа мерлен", "леруа", "leroy merlin", "лемана про", "лемана"]),
     ("Петрович", ["петрович", "стд петрович"]),
     ("Hoff", ["hoff", "хофф"]),
-    ("Wildberries", ["вайлдберриз", "wildberries", "вайлдбериз"]),
+    ("Wildberries", ["вайлдберриз", "wildberries", "вайлдбериз", "wb.ru", "wb"]),
     ("Ozon", ["ozon", "озон"]),
+    ("Яндекс Маркет", ["яндекс маркет", "яндекс.маркет", "yandex market", "маркет пэй"]),
+    ("Мегамаркет", ["мегамаркет", "сбермегамаркет", "megamarket"]),
+    ("Авито", ["авито", "avito"]),
+    ("AliExpress", ["aliexpress", "алиэкспресс", "али"]),
+    ("Lamoda", ["lamoda", "ламода"]),
     ("Золотое Яблоко", ["золотое яблоко"]),
     ("Лэтуаль", ["летуаль", "лэтуаль"]),
     ("Детский Мир", ["детский мир"]),
@@ -363,18 +368,29 @@ def _find_transfer_details(lines: list[str], full_text: str) -> dict | None:
 
 
 def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]]:
-    """Гибкий поиск суммы: чеки, переводы, история покупок в приложениях, записи на бумаге.
+    """Гибкий поиск суммы: чеки, переводы, история покупок в приложениях, маркетплейсы, записи на бумаге.
 
     Возвращает (сумма, список_заметок).
     """
+    # 0. Поиск зачёркнутых / старых цен со скидкой (например, «2432P-63%», «3500 ₽ -50%»)
+    discount_old_prices = set()
+    for l in lines:
+        m_disc = re.search(r"([0-9\s]{1,8}(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpPD]|руб)?\s*-\s*\d{1,2}%", l, re.IGNORECASE)
+        if m_disc:
+            s_d = m_disc.group(1).replace(" ", "").replace("\xa0", "").replace(",", ".")
+            try:
+                discount_old_prices.add(float(s_d))
+            except ValueError:
+                pass
+
     # Приоритет 1: Строка со словом ИТОГ / ИТОГО / К ОПЛАТЕ / СУММА / СУММА ПЕРЕВОДА / ОПЛАЧЕНО
     total_re = re.compile(
-        r"(?:ИТОГ[А-Я]*|ИТОГО|СУММА\s*ПЕРЕВОДА|СУММА|К\s*ОПЛАТЕ|ВСЕГО|ОПЛАЧЕНО|СПИСАНО|ИТОГ\s*К\s*ОПЛАТЕ|ЭЛЕКТРОННЫМИ|НАЛИЧНЫМИ)[\s:=]*[+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:₽|руб|р\b)?",
+        r"(?:ИТОГ[А-Я]*|ИТОГО|СУММА\s*ПЕРЕВОДА|СУММА|К\s*ОПЛАТЕ|ВСЕГО|ОПЛАЧЕНО|СПИСАНО|ИТОГ\s*К\s*ОПЛАТЕ|ЭЛЕКТРОННЫМИ|НАЛИЧНЫМИ)[\s:=]*[+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpPD]|руб|р\b)?",
         re.IGNORECASE,
     )
     for l in lines:
         low = l.lower()
-        if any(skip in low for skip in ["комиссия", "баланс", "бонус", "кэшбэк", "остаток"]):
+        if any(skip in low for skip in ["комиссия", "баланс", "бонус", "кэшбэк", "остаток", "мили"]):
             continue
         m = total_re.search(l)
         if m:
@@ -391,9 +407,9 @@ def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]
         if re.search(r"\b(ИТОГ|ИТОГО|К\s*ОПЛАТЕ|СУММА|СУММА\s*ПЕРЕВОДА|СПИСАНИЕ|ОПЛАЧЕНО|УСПЕШНО|ИСПОЛНЕН)\b", l, re.IGNORECASE):
             next_line = lines[i + 1]
             low_next = next_line.lower()
-            if any(skip in low_next for skip in ["комиссия", "баланс", "бонус", "кэшбэк", "остаток"]):
+            if any(skip in low_next for skip in ["комиссия", "баланс", "бонус", "кэшбэк", "остаток", "мили"]):
                 continue
-            m = re.search(r"^[+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:₽|руб|р\b)?$", next_line.strip())
+            m = re.search(r"^[+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpPD]|руб|р\b)?$", next_line.strip())
             if not m:
                 m = re.search(r"[+-]?\s*([0-9\s]+(?:[.,][0-9]{2}))", next_line)
             if m:
@@ -405,17 +421,29 @@ def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]
                 except ValueError:
                     pass
 
-    # Приоритет 3: Явное число с символом валюты (например '1 500 ₽', '-850 ₽', '1 240,50 ₽')
-    # Отсекаем строки с комиссией, остатком, бонусами, картой и номерами счетов
-    curr_re = re.compile(r"^[+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:₽|руб\.?|р\b)", re.IGNORECASE)
+    # Приоритет 3: Явное число с символом валюты (например '1 500 ₽', '-850 ₽', '1 240,50 ₽', '891D', '1390P')
+    # Распознаём как стандартный символ ₽/руб, так и типичные артефакты OCR (буквы D, P, p, d прикреплённые к числу)
+    curr_re_standalone = re.compile(
+        r"^[+-]?\s*([0-9\s]{1,8}(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpP]|руб\.?|р\b|(?<=\d)[DPdp]\b|(?<=\d)[DPdp]$)",
+        re.IGNORECASE,
+    )
+    curr_re_inline = re.compile(
+        r"(?:^|\s)[+-]?([0-9\s]{1,8}(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpP]|руб\b|(?<=\d)[DPdp]\b|(?<=\d)[DPdp]$)",
+        re.IGNORECASE,
+    )
     curr_candidates = []
     for l in lines:
-        low = l.lower()
-        if any(skip in low for skip in ["комиссия", "баланс", "остаток", "бонус", "начислен", "кэшбэк", "скидк", "карта", "счет", "счёт"]):
+        # Пропускаем размеры и габариты товаров (50x70, 100x150, 50*70)
+        if re.search(r"\b\d+\s*[xх*×]\s*\d+\b", l, re.IGNORECASE):
             continue
-        m = curr_re.search(l.strip())
+        low = l.lower()
+        if any(skip in low for skip in [
+            "комиссия", "баланс", "остаток", "бонус", "начислен", "кэшбэк", "скидк", "карта", "счет", "счёт", "мили", "артикул", "похожие"
+        ]):
+            continue
+        m = curr_re_standalone.search(l.strip())
         if not m:
-            m = re.search(r"(?:^|\s)[+-]?([0-9\s]{1,10}(?:[.,][0-9]{1,2})?)\s*(?:₽|руб\b)", l, re.IGNORECASE)
+            m = curr_re_inline.search(l.strip())
         if m:
             s = m.group(1).replace(" ", "").replace("\xa0", "").replace(",", ".")
             try:
@@ -425,7 +453,10 @@ def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]
             except ValueError:
                 pass
     if curr_candidates:
-        return max(curr_candidates), []
+        valid = [c for c in curr_candidates if c not in discount_old_prices]
+        if valid:
+            return (valid[0] if discount_old_prices else max(valid)), []
+        return curr_candidates[0], []
 
     # Приоритет 4: Записи от руки или на бумаге («Продукты 1200», «Такси 450», «Помело 280», «450 такси»)
     note_candidates = []
@@ -608,7 +639,7 @@ def scan_receipt_image(
                 "method": "note",
             }
 
-        # 3c. История покупок в приложении магазина
+        # 3c. История покупок в приложении магазина или карточка маркетплейса
         if merchant:
             category = store_cat
             if not category:
@@ -616,16 +647,25 @@ def scan_receipt_image(
             if not category and caption:
                 category, _ = classify_expense(user_id, caption, user_existing_categories)
 
-            items = [l for l in ocr_lines if len(l) > 3 and not re.search(r"(ИТОГ|ИТОГО|КАССОВЫЙ|ФН|ФД|ФП|НДС|СПАСИБО)", l, re.IGNORECASE)]
+            is_mkt = merchant in ("Ozon", "Wildberries", "Яндекс Маркет", "Мегамаркет", "Авито", "AliExpress", "Lamoda") or bool(
+                re.search(r"\b(в\s*корзину|купить|доставим|доставка|постоплата|артикул|товары\s*на\s*фото)\b", full_text, re.IGNORECASE)
+            )
+            method_type = "marketplace" if is_mkt else "store_app"
+
+            skip_regex = r"(ИТОГ|ИТОГО|КАССОВЫЙ|ФН|ФД|ФП|НДС|СПАСИБО|В\s*КОРЗИНУ|ПОХОЖИЕ|ОПЛАЧЕНО|ДОСТАВИМ|ПОСТОПЛАТА|С\s*БАНКАМИ|ТОВАРЫ\s*НА\s*ФОТО|OZON|WILDBERRIES|МАРКЕТ|60HK|C6AHKAMM)"
+            items = [
+                l for l in ocr_lines
+                if len(l) >= 2 and not re.search(skip_regex, l, re.IGNORECASE) and not re.search(r"^[0-9\s]+(?:[.,][0-9]{1,2})?\s*(?:[₽рРpPD]|руб)?$", l)
+            ]
 
             return {
                 "success": True,
                 "amount": amount,
                 "spent_date": spent_d,
                 "merchant": merchant,
-                "category": category or "Продукты",
+                "category": category or ("Покупки" if is_mkt else "Продукты"),
                 "items": items[:5],
-                "method": "store_app",
+                "method": method_type,
             }
 
         # 3d. Обычный чек (OCR)
