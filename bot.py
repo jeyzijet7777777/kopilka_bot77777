@@ -1139,9 +1139,9 @@ def settings_inline_kb(user_id: int):
     info = get_budget_info(user_id)
     reminder_time = get_setting(user_id, "reminder_time", "21:00")
     days_label = (
-        f"{info['days_in_month']} дн. (авто)"
+        f"{info['days_in_month']} дн."
         if not info["is_custom_days"]
-        else f"{info['days_in_month']} дн. (ручное)"
+        else f"{info['days_in_month']} дн. (руч)"
     )
     chart_on = get_setting(user_id, "report_chart", "1") == "1"
     month_report_on = get_setting(user_id, "month_report", "1") != "0"
@@ -1149,33 +1149,46 @@ def settings_inline_kb(user_id: int):
     week_on = get_setting(user_id, "week_summary", "1") != "0"
     auto_cat_on = get_setting(user_id, "auto_category", "1") != "0"
     ask_cat_on = get_setting(user_id, "ask_cat_on_num", "0") != "0"
-    compact_on = get_setting(user_id, "compact_mode", "0") == "1"
+    compact_on = get_setting(user_id, "compact_mode", "1") != "0"
     recalc_on = get_setting(user_id, "recalc_mode", "0") == "1"
     mode_label = INCOME_MODE_SHORT.get(info["income_mode"], info["income_mode"])
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🏦 Доход: {fmt_money(info['raw_income'])} ({mode_label})", callback_data="set_daily_income")],
-        [InlineKeyboardButton("🔄 Изменить график получения дохода", callback_data="set_income_mode")],
-        [InlineKeyboardButton(f"📅 Дней в месяце: {days_label}", callback_data="set_days_count")],
-        [InlineKeyboardButton(f"🔄 Перерасчёт лимита: {'вкл' if recalc_on else 'выкл'}", callback_data="toggle_recalc_mode")],
-        [InlineKeyboardButton(f"⏰ Время отчёта, {TZ_LABEL} (сейчас {reminder_time})", callback_data="set_reminder_time")],
-        [InlineKeyboardButton(f"💬 Компактные ответы: {'вкл' if compact_on else 'выкл'}", callback_data="toggle_compact_mode")],
-        [InlineKeyboardButton("📱 Виджеты (iOS / Android) & Web App", callback_data="open_widgets_hub")],
-        [InlineKeyboardButton(f"🪄 Авто-категории трат: {'вкл' if auto_cat_on else 'выкл'}", callback_data="toggle_auto_category")],
-        [InlineKeyboardButton(f"❓ Спрашивать категорию для чисел: {'вкл' if ask_cat_on else 'выкл'}", callback_data="toggle_ask_category")],
-        [InlineKeyboardButton("🪄 Исправить старые категории трат", callback_data="run_fix_categories")],
-        [InlineKeyboardButton(f"📈 График в вечернем отчёте: {'вкл' if chart_on else 'выкл'}", callback_data="toggle_report_chart")],
-        [InlineKeyboardButton(f"📅 Отчёт за месяц 1-го числа: {'вкл' if month_report_on else 'выкл'}", callback_data="toggle_month_report")],
-        [InlineKeyboardButton(f"📆 Сводка за неделю по понедельникам: {'вкл' if week_on else 'выкл'}", callback_data="toggle_week_summary")],
-        [InlineKeyboardButton(f"⚠️ Предупреждение на 80% лимита: {'вкл' if warn_on else 'выкл'}", callback_data="toggle_warn_limit")],
-        [InlineKeyboardButton("💰 Плановая копилка", callback_data="set_save")],
-        [InlineKeyboardButton("🏦 История копилки", callback_data="piggy_history")],
         [
-            InlineKeyboardButton("➕ Добавить обяз. расход", callback_data="add_mand"),
-            InlineKeyboardButton("🗑 Удалить обяз. расход", callback_data="del_mand_menu"),
+            InlineKeyboardButton("🔄 График дохода", callback_data="set_income_mode"),
+            InlineKeyboardButton(f"📅 Дней: {days_label}", callback_data="set_days_count"),
         ],
-        [InlineKeyboardButton("🔄 Запустить мастера настройки", callback_data="restart_wizard")],
-        [InlineKeyboardButton("🧹 Сбросить текущий ввод", callback_data="restart_bot_action")],
-        [InlineKeyboardButton("⚠️ Полный сброс всех данных", callback_data="full_reset_action")],
+        [
+            InlineKeyboardButton(f"🔄 Перерасчёт лимита: {'вкл' if recalc_on else 'выкл'}", callback_data="toggle_recalc_mode"),
+            InlineKeyboardButton("💰 Копилка", callback_data="set_save"),
+        ],
+        [
+            InlineKeyboardButton(f"⏰ Отчёт в {reminder_time}", callback_data="set_reminder_time"),
+            InlineKeyboardButton(f"⚠️ Предупреждение 80%: {'вкл' if warn_on else 'выкл'}", callback_data="toggle_warn_limit"),
+        ],
+        [
+            InlineKeyboardButton(f"📅 Отчёт за месяц 1-го числа: {'вкл' if month_report_on else 'выкл'}", callback_data="toggle_month_report"),
+            InlineKeyboardButton(f"📆 Сводка за неделю: {'вкл' if week_on else 'выкл'}", callback_data="toggle_week_summary"),
+        ],
+        [
+            InlineKeyboardButton(f"💬 Компактные ответы: {'вкл' if compact_on else 'выкл'}", callback_data="toggle_compact_mode"),
+            InlineKeyboardButton(f"📈 График в отчёте: {'вкл' if chart_on else 'выкл'}", callback_data="toggle_report_chart"),
+        ],
+        [
+            InlineKeyboardButton(f"🪄 Авто-категории: {'вкл' if auto_cat_on else 'выкл'}", callback_data="toggle_auto_category"),
+            InlineKeyboardButton(f"❓ Для чисел: {'вкл' if ask_cat_on else 'выкл'}", callback_data="toggle_ask_category"),
+        ],
+        [
+            InlineKeyboardButton("🪄 Исправить категории", callback_data="run_fix_categories"),
+            InlineKeyboardButton("📱 Виджеты & App", callback_data="open_widgets_hub"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Мастер настройки", callback_data="restart_wizard"),
+            InlineKeyboardButton("🧹 Сбросить ввод", callback_data="restart_bot_action"),
+        ],
+        [
+            InlineKeyboardButton("⚠️ Полный сброс всех данных", callback_data="full_reset_action"),
+        ],
     ])
 
 
@@ -2184,23 +2197,19 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def menu_hub_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🏦 Копилка", callback_data="menu_piggy"),
-            InlineKeyboardButton("🧾 Траты", callback_data="menu_history"),
+            InlineKeyboardButton("🧾 История трат", callback_data="menu_history"),
+            InlineKeyboardButton("🏠 Обязательные счета", callback_data="bills_refresh"),
         ],
         [
-            InlineKeyboardButton("🏠 Обязательные счета", callback_data="bills_refresh"),
+            InlineKeyboardButton("📈 Графики", callback_data="chart_overview"),
+            InlineKeyboardButton("🏷 Категории", callback_data="menu_categories"),
+        ],
+        [
+            InlineKeyboardButton("📥 Скачать Excel", callback_data="menu_excel"),
             InlineKeyboardButton("📚 Архив месяцев", callback_data="menu_months"),
         ],
         [
-            InlineKeyboardButton("📈 Графика трат", callback_data="chart_overview"),
-            InlineKeyboardButton("🏷 Траты по категориям", callback_data="menu_categories"),
-        ],
-        [
             InlineKeyboardButton("📱 Виджеты & Web App", callback_data="open_widgets_hub"),
-            InlineKeyboardButton("📥 Скачать Excel", callback_data="menu_excel"),
-        ],
-        [
-            InlineKeyboardButton("📷 Сканировать чек / фото", callback_data="menu_scan_receipt"),
             InlineKeyboardButton("⚙️ Настройки бюджета", callback_data="menu_settings"),
         ],
         [
@@ -2283,20 +2292,13 @@ async def show_widgets_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_menu_hub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "⚙️ *Меню и дополнительные сервисы*\n\n"
-        "Выберите нужный раздел или отчёт:\n"
-        "• 🏦 *Копилка* — баланс, история пополнений и финансовые цели\n"
-        "• 🧾 *Траты* — список последних трат с возможностью правки\n"
-        "• 🏠 *Счета* — обязательные расходы и статус оплаты\n"
-        "• 📚 *Архив* — сравнение и история прошлых месяцев\n"
-        "• 📈 *Графика* — визуальные диаграммы расходов и календаря\n"
-        "• 🏷 *Категории* — подробная разбивка расходов по статьям\n"
-        "• 📱 *Виджеты & Web App* — для iOS (Scriptable, Команды) и Android (KWGT)\n"
-        "• 📥 *Excel* — полная выгрузка персональной таблицы\n"
-        "• 📷 *Сканер* — фото чеков, квитанций, переводов и записей\n"
-        "• ⚙️ *Настройки* — доходы, параметры лимита и компактный режим\n"
-        "• ↩️ *Отмена* — быстрый откат последней добавленной траты\n\n"
-        "💡 _Подсказка: чтобы записать трату, просто отправьте, например: `450 продукты`._"
+        "⚙️ *Меню и сервисы*\n\n"
+        "• 🧾 *Траты и счета* — история расходов и статус оплат\n"
+        "• 📊 *Аналитика* — графики, категории и архив месяцев\n"
+        "• 📥 *Данные* — выгрузка в персональный Excel\n"
+        "• 📱 *Интеграции* — виджеты iOS/Android и Mini App\n"
+        "• ⚙️ *Настройки* — параметры лимита и уведомлений\n\n"
+        "💡 _Для записи расхода отправьте: `450 продукты` или фото чека._"
     )
     if update.callback_query:
         await update.callback_query.message.reply_text(text, parse_mode="Markdown", reply_markup=menu_hub_kb())
@@ -3184,7 +3186,7 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
                 preview += "..."
             items_line = f"\n{items_label}: _{esc(preview)}_"
 
-        compact_on = get_setting(user_id, "compact_mode", "0") == "1"
+        compact_on = get_setting(user_id, "compact_mode", "1") != "0"
         if compact_on:
             b_info = get_budget_info(user_id, spent_d)
             rem_raw = b_info["daily_limit"] - (before + amount)
@@ -3199,7 +3201,8 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
                     else:
                         recalc_hint = f" · с завтра: ~{fmt_money(tomorrow_lim)}"
             compact_text = (
-                f"{method_badge}: *{fmt_money(amount)}* — {esc(category)}{merch_line}\n"
+                f"✅ *{method_title}*\n"
+                f"💰 Сумма: *{fmt_money(amount)}* — {esc(category)}{merch_line}\n"
                 f"📊 Остаток на сегодня: *{fmt_money(rem)}*{recalc_hint}\n{warning}"
             )
             compact_kb_rows = list(chips) if chips else []
@@ -3554,22 +3557,12 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 async def post_init(app):
     try:
         await app.bot.set_my_commands([
-            BotCommand("today", "📊 Сводка за сегодня"),
-            BotCommand("month", "📅 Сводка за месяц"),
-            BotCommand("bills", "🏠 Счета и обязательные траты"),
-            BotCommand("piggy", "🏦 Копилка и операции"),
-            BotCommand("history", "🧾 Последние траты: правка/удаление"),
-            BotCommand("categories", "🏷 Расходы по категориям"),
-            BotCommand("widget", "📱 Виджеты (iOS / Android) & Web App"),
-            BotCommand("menu", "⚙️ Меню и сервисы"),
-            BotCommand("chart", "📈 Графика и диаграммы"),
-            BotCommand("excel", "📥 Скачать Excel-отчет"),
-            BotCommand("week", "📆 Траты за 7 дней"),
-            BotCommand("months", "📚 Архив прошлых месяцев"),
-            BotCommand("undo", "↩️ Отменить последнюю операцию"),
-            BotCommand("recalc", "🔄 Перерасчёт лимита: вкл/выкл"),
-            BotCommand("settings", "⚙️ Настройки бюджета"),
-            BotCommand("help", "ℹ️ Справка и подсказки"),
+            BotCommand("today", "📊 Сегодня — лимит и остаток"),
+            BotCommand("month", "📅 Месяц — бюджет и траты"),
+            BotCommand("piggy", "🏦 Копилка — баланс и цели"),
+            BotCommand("bills", "🏠 Счета — обязательные платежи"),
+            BotCommand("undo", "↩️ Отменить последнюю трату"),
+            BotCommand("settings", "⚙️ Настройки и сервисы"),
         ])
     except TelegramError:
         logger.warning("Не удалось установить меню команд")
@@ -4007,8 +4000,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await refresh_settings(query, user_id)
 
     elif data == "toggle_compact_mode":
-        cur = get_setting(user_id, "compact_mode", "0")
-        new_val = "1" if cur == "0" else "0"
+        cur = get_setting(user_id, "compact_mode", "1")
+        new_val = "0" if cur == "1" else "1"
         set_setting(user_id, "compact_mode", new_val)
         status = "включены (короткий аккуратный ответ при записи)" if new_val == "1" else "выключены (полный дневной отчёт)"
         await query.message.reply_text(f"💬 Компактные ответы: *{status}*.", parse_mode="Markdown")
@@ -4876,7 +4869,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         report_text, markup = build_day_report(user_id, spent_d, extra_rows=chips)
         merch_str = f" ({esc(merchant)})" if merchant else ""
-        compact_on = get_setting(user_id, "compact_mode", "0") == "1"
+        compact_on = get_setting(user_id, "compact_mode", "1") != "0"
         if compact_on:
             b_info = get_budget_info(user_id, spent_d)
             rem_raw = b_info["daily_limit"] - (before + amount)
@@ -4891,7 +4884,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         recalc_hint = f" · с завтра: ~{fmt_money(tomorrow_lim)}"
             compact_text = (
-                f"🧾 Оплата: *{fmt_money(amount)}* — {esc(category)}{merch_str}\n"
+                f"🧾 Распознана оплата: *{fmt_money(amount)}* — {esc(category)}{merch_str}\n"
                 f"📊 Остаток на сегодня: *{fmt_money(rem)}*{recalc_hint}\n{warning}"
             )
             compact_kb_rows = list(chips) if chips else []
@@ -4998,7 +4991,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warning = limit_warning(user_id, spent_d, before, before + amount)
     extra = suggestion_rows(user_id, exp_id, category, was_default, similar, candidates=candidate_chips)
     report_text, markup = build_day_report(user_id, spent_d, extra_rows=extra)
-    compact_on = get_setting(user_id, "compact_mode", "0") == "1"
+    compact_on = get_setting(user_id, "compact_mode", "1") != "0"
     if compact_on:
         b_info = get_budget_info(user_id, spent_d)
         rem_raw = b_info["daily_limit"] - (before + amount)
@@ -5017,7 +5010,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 Остаток на сегодня: *{fmt_money(rem)}*{recalc_hint}\n{warning}"
         )
         compact_kb_rows = list(extra) if extra else []
-        compact_kb_rows.append([InlineKeyboardButton("📊 Полный отчёт дня", callback_data=f"show_full_day_{spent_d.isoformat()}")])
+        compact_kb_rows.append([
+            InlineKeyboardButton("✏️ Изменить", callback_data=f"xe_open_{exp_id}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"delexp_{exp_id}"),
+            InlineKeyboardButton("📊 Отчёт дня", callback_data=f"show_full_day_{spent_d.isoformat()}"),
+        ])
         await update.message.reply_text(
             compact_text,
             parse_mode="Markdown",
