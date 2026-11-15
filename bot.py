@@ -3087,8 +3087,11 @@ async def _process_receipt_bytes(msg, user_id: int, image_bytes: bytes, caption:
         )
 
         if not result or not result.get("success") or not result.get("amount"):
+            err_msg = result.get("error") if result else ""
+            hint = f"⚠️ _{esc(err_msg)}_\n\n" if err_msg and "Модуль" in err_msg else ""
             await status_msg.edit_text(
-                "🤔 Не удалось распознать сумму на изображении.\n\n"
+                f"🤔 Не удалось распознать сумму на изображении.\n\n"
+                f"{hint}"
                 "💡 Вы можете отправить:\n"
                 "• 🧾 Кассовый чек (с QR-кодом или строкой «ИТОГО»)\n"
                 "• 💳 Скриншот перевода (СберБанк, Т-Банк, СБП, Альфа и др.)\n"

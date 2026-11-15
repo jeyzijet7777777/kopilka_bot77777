@@ -16,6 +16,13 @@ ENV PYTHONUNBUFFERED=1 \
     WIDGET_API_PORT=8080 \
     WIDGET_API_BASE_URL=https://bot-1793275701-1092-jeyzi008.bothost.tech
 
+# Системные зависимости для OpenCV, RapidOCR, Pillow и ONNXRuntime в Debian slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

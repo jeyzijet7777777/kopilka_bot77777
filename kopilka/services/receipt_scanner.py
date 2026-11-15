@@ -22,7 +22,8 @@ import logging
 import os
 import re
 import urllib.parse
-from PIL import Image
+from PIL import Image, ImageOps
+import numpy as np
 
 logger = logging.getLogger("budget-bot")
 
@@ -38,10 +39,15 @@ try:
 
     def get_ocr():
         global _ocr_engine
-        if _ocr_engine is None:
-            _ocr_engine = RapidOCR()
-        return _ocr_engine
-except ImportError:
+        if _ocr_engine is None and RapidOCR is not None:
+            try:
+                _ocr_engine = RapidOCR()
+            except Exception as e:
+                logger.exception("Ошибка инициализации RapidOCR: %s", e)
+                _ocr_engine = False
+        return _ocr_engine if _ocr_engine is not False else None
+except Exception as e:
+    logger.warning("RapidOCR недоступен (OCR отключён): %s", e)
     RapidOCR = None
     get_ocr = lambda: None
 
@@ -274,9 +280,15 @@ def _find_merchant_in_text(text: str) -> tuple[str | None, str | None]:
     """
     low = text.lower()
     for store_name, aliases in KNOWN_STORES:
-        if any(a in low for a in aliases):
-            cat, _ = classify_expense(0, store_name, [])
-            return store_name, cat
+        for a in aliases:
+            if len(a) <= 3:
+                if re.search(r"(?<![a-zа-я0-9])" + re.escape(a) + r"(?![a-zа-я0-9])", low):
+                    cat, _ = classify_expense(0, store_name, [])
+                    return store_name, cat
+            else:
+                if a in low:
+                    cat, _ = classify_expense(0, store_name, [])
+                    return store_name, cat
     return None, None
 
 
@@ -367,11 +379,22 @@ def _find_transfer_details(lines: list[str], full_text: str) -> dict | None:
     }
 
 
-def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]]:
+def _normalize_ocr_line(l: str) -> str:
+    """Нормализует строку OCR: пробелы, слипшиеся символы рубля и артефакты."""
+    # 1. Заменяем слитные артефакты OCR рубля между цифрами: "891D2432" -> "891 ₽ 2432"
+    l = re.sub(r"(?<=\d)[DPdp](?=\d)", " ₽ ", l)
+    # 2. Заменяем знак рубля или артефакт в конце числа перед символами/процентами: "891D-63%" -> "891 ₽ -63%"
+    l = re.sub(r"(?<=\d)[DPdp](?=[^A-Za-z0-9]|$)", " ₽ ", l)
+    return l
+
+
+def _extract_amount_and_notes(raw_lines: list[str]) -> tuple[float | None, list[str]]:
     """Гибкий поиск суммы: чеки, переводы, история покупок в приложениях, маркетплейсы, записи на бумаге.
 
     Возвращает (сумма, список_заметок).
     """
+    lines = [_normalize_ocr_line(l) for l in raw_lines]
+
     # 0. Поиск зачёркнутых / старых цен со скидкой (например, «2432P-63%», «3500 ₽ -50%»)
     discount_old_prices = set()
     for l in lines:
@@ -385,7 +408,7 @@ def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]
 
     # Приоритет 1: Строка со словом ИТОГ / ИТОГО / К ОПЛАТЕ / СУММА / СУММА ПЕРЕВОДА / ОПЛАЧЕНО
     total_re = re.compile(
-        r"(?:ИТОГ[А-Я]*|ИТОГО|СУММА\s*ПЕРЕВОДА|СУММА|К\s*ОПЛАТЕ|ВСЕГО|ОПЛАЧЕНО|СПИСАНО|ИТОГ\s*К\s*ОПЛАТЕ|ЭЛЕКТРОННЫМИ|НАЛИЧНЫМИ)[\s:=]*[+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpPD]|руб|р\b)?",
+        r"(?:ИТОГ[А-Я0-9]*|ИТОГО|ИТ0Г[А-Я0-9]*|СУММА\s*ПЕРЕВОДА|СУММА|К\s*ОПЛАТЕ|ВСЕГО|ОПЛАЧЕНО|СПИСАНО|ИТОГ\s*К\s*ОПЛАТЕ|ЭЛЕКТРОННЫМИ|НАЛИЧНЫМИ)[\s:=]*[=~*+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpPD]|руб|р\b)?",
         re.IGNORECASE,
     )
     for l in lines:
@@ -397,26 +420,26 @@ def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]
             s = m.group(1).replace(" ", "").replace("\xa0", "").replace(",", ".")
             try:
                 amt = float(s)
-                if 0.5 <= amt <= 10_000_000:
+                if 0.5 <= amt <= 10_000_000 and amt not in discount_old_prices:
                     return amt, []
             except ValueError:
                 pass
 
     # Приоритет 2: Ключевое слово на одной строке, а число на следующей
     for i, l in enumerate(lines[:-1]):
-        if re.search(r"\b(ИТОГ|ИТОГО|К\s*ОПЛАТЕ|СУММА|СУММА\s*ПЕРЕВОДА|СПИСАНИЕ|ОПЛАЧЕНО|УСПЕШНО|ИСПОЛНЕН)\b", l, re.IGNORECASE):
+        if re.search(r"\b(ИТОГ|ИТОГО|ИТ0Г|К\s*ОПЛАТЕ|СУММА|СУММА\s*ПЕРЕВОДА|СПИСАНИЕ|ОПЛАЧЕНО|УСПЕШНО|ИСПОЛНЕН)\b", l, re.IGNORECASE):
             next_line = lines[i + 1]
             low_next = next_line.lower()
             if any(skip in low_next for skip in ["комиссия", "баланс", "бонус", "кэшбэк", "остаток", "мили"]):
                 continue
-            m = re.search(r"^[+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpPD]|руб|р\b)?$", next_line.strip())
+            m = re.search(r"^[=~*+-]?\s*([0-9\s]+(?:[.,][0-9]{1,2})?)\s*(?:[₽рРpPD]|руб|р\b)?$", next_line.strip())
             if not m:
-                m = re.search(r"[+-]?\s*([0-9\s]+(?:[.,][0-9]{2}))", next_line)
+                m = re.search(r"[=~*+-]?\s*([0-9\s]+(?:[.,][0-9]{2}))", next_line)
             if m:
                 s = m.group(1).replace(" ", "").replace("\xa0", "").replace(",", ".")
                 try:
                     amt = float(s)
-                    if 0.5 <= amt <= 10_000_000:
+                    if 0.5 <= amt <= 10_000_000 and amt not in discount_old_prices:
                         return amt, []
                 except ValueError:
                     pass
@@ -441,10 +464,7 @@ def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]
             "комиссия", "баланс", "остаток", "бонус", "начислен", "кэшбэк", "скидк", "карта", "счет", "счёт", "мили", "артикул", "похожие"
         ]):
             continue
-        m = curr_re_standalone.search(l.strip())
-        if not m:
-            m = curr_re_inline.search(l.strip())
-        if m:
+        for m in curr_re_inline.finditer(l):
             s = m.group(1).replace(" ", "").replace("\xa0", "").replace(",", ".")
             try:
                 amt = float(s)
@@ -482,6 +502,29 @@ def _extract_amount_and_notes(lines: list[str]) -> tuple[float | None, list[str]
         items = [f"{w} {int(a) if a.is_integer() else a}₽" for a, w in note_candidates]
         return tot, items
 
+    # Приоритет 5: Цены кассового чека с копейками (например, 1 245.50 или 450.00)
+    # Если на фото чек без слова «ИТОГО», берём максимальную сумму с копейками
+    decimal_candidates = []
+    for l in lines:
+        if re.search(r"\b\d+\s*[xх*×]\s*\d+\b", l, re.IGNORECASE):
+            continue
+        low = l.lower()
+        if any(skip in low for skip in [
+            "комиссия", "баланс", "остаток", "бонус", "начислен", "кэшбэк", "карта", "счет", "счёт", "телефон", "инн", "кпп", "р/с", "бик", "чек"
+        ]):
+            continue
+        m = re.search(r"(?:^|\s)[=~*+-]?\s*([0-9\s]{1,8}[.,][0-9]{2})(?:\s|$)", l)
+        if m:
+            s = m.group(1).replace(" ", "").replace("\xa0", "").replace(",", ".")
+            try:
+                amt = float(s)
+                if 1.0 <= amt <= 10_000_000 and amt not in discount_old_prices:
+                    decimal_candidates.append(amt)
+            except ValueError:
+                pass
+    if decimal_candidates:
+        return max(decimal_candidates), []
+
     return None, []
 
 
@@ -510,9 +553,19 @@ def scan_receipt_image(
     """
     try:
         pil_img = Image.open(io.BytesIO(image_bytes))
+        pil_img = ImageOps.exif_transpose(pil_img) or pil_img
+        if pil_img.mode not in ("RGB", "L"):
+            pil_img = pil_img.convert("RGB")
     except Exception as e:
         logger.warning("Не удалось открыть изображение: %s", e)
         return {"success": False, "error": "Не удалось открыть изображение."}
+
+    # Масштабируем огромные фото со смартфонов (3000x4000) до разумного размера для ускорения и экономии памяти
+    max_side = max(pil_img.size)
+    if max_side > 1920:
+        scale = 1920 / max_side
+        new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
+        pil_img = pil_img.resize(new_size, Image.Resampling.LANCZOS)
 
     qr_res = None
     # 1. Попытка чтения QR-кода через zxingcpp
@@ -533,11 +586,29 @@ def scan_receipt_image(
     ocr_engine = get_ocr()
     if ocr_engine:
         try:
-            ocr_out, _ = ocr_engine(image_bytes)
+            ocr_out, _ = ocr_engine(np.array(pil_img))
             if ocr_out:
-                ocr_lines = [item[1].strip() for item in ocr_out if item and len(item) > 1]
+                ocr_lines = [_normalize_ocr_line(item[1].strip()) for item in ocr_out if item and len(item) > 1]
         except Exception as e:
-            logger.debug("Ошибка при выполнении OCR: %s", e)
+            logger.warning("Ошибка при выполнении RapidOCR: %s", e)
+
+        # Если на фото ничего не нашлось или нет суммы, пробуем повернуть на 90° и 270°
+        # (частый случай: телефон держали боком, а EXIF метаданные стёрлись или отсутствовали)
+        if not ocr_lines or (_extract_amount_and_notes(ocr_lines)[0] is None and not qr_res):
+            for angle in (90, 270):
+                try:
+                    rotated_img = pil_img.rotate(angle, expand=True)
+                    rot_out, _ = ocr_engine(np.array(rotated_img))
+                    if rot_out:
+                        rot_lines = [_normalize_ocr_line(item[1].strip()) for item in rot_out if item and len(item) > 1]
+                        rot_amt, _ = _extract_amount_and_notes(rot_lines)
+                        if rot_amt is not None or (not ocr_lines and len(rot_lines) > len(ocr_lines)):
+                            ocr_lines = rot_lines
+                            pil_img = rotated_img
+                            if rot_amt is not None:
+                                break
+                except Exception:
+                    pass
 
     full_text = " ".join(ocr_lines)
     if caption:
@@ -687,9 +758,17 @@ def scan_receipt_image(
             "method": "ocr",
         }
 
+    ocr_err = None
+    if ocr_engine is None and not zxingcpp:
+        ocr_err = "Модуль распознавания текста (OCR) не установлен на сервере."
+    elif not ocr_lines and not qr_res:
+        ocr_err = "Текст на изображении не обнаружен. Попробуйте сделать фото чётче или ближе."
+    else:
+        ocr_err = "Не удалось найти сумму на изображении чека, перевода или заметки."
+
     return {
         "success": False,
-        "error": "Не удалось найти сумму на изображении чека, перевода или заметки.",
+        "error": ocr_err,
         "merchant": merchant,
         "ocr_lines_found": len(ocr_lines),
     }
