@@ -13,8 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/app/data \
     DB_PATH=/app/data/budget.db \
     STATE_PATH=/app/data/bot_state.pkl \
-    WIDGET_API_PORT=8080 \
-    WIDGET_API_BASE_URL=https://bot-1793275701-1092-jeyzi008.bothost.tech
+    WIDGET_API_PORT=8080
 
 # Системные зависимости для OpenCV, RapidOCR, Pillow и ONNXRuntime в Debian slim
 RUN apt-get update && apt-get install -y --no-install-recommends \

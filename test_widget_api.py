@@ -139,6 +139,10 @@ def test_widget_http_endpoints(env):
             assert "inpReceipt" in wa_html
             assert "overflow-x: hidden" in wa_html
             assert "kopilka_token" in wa_resp.cookies
+            assert wa_resp.cookies["kopilka_token"]["httponly"] is True
+            assert wa_resp.headers.get("Referrer-Policy") == "no-referrer"
+            assert 'name="referrer" content="no-referrer"' in wa_html
+            assert "function escapeHtml" in wa_html
 
             # 8b. Classify API endpoint
             cl_resp = await client.get(f"/api/v1/{tok}/classify?q=помело")
@@ -216,3 +220,53 @@ def test_widget_http_endpoints(env):
             await client.close()
 
     asyncio.run(_run())
+
+
+def test_excel_formula_sanitization():
+    from bot import _sanitize_excel_cell
+    assert _sanitize_excel_cell("=1+1") == "'=1+1"
+    assert _sanitize_excel_cell("+cmd|' /C calc'!A0") == "'+cmd|' /C calc'!A0"
+    assert _sanitize_excel_cell("-100") == "'-100"
+    assert _sanitize_excel_cell("@SUM(A1:A5)") == "'@SUM(A1:A5)"
+    assert _sanitize_excel_cell("Обычный текст") == "Обычный текст"
+    assert _sanitize_excel_cell(12345) == 12345
+
+
+def test_telegram_init_data_verification(monkeypatch):
+    import hashlib
+    import hmac
+    import json
+    import time
+    from kopilka.services.widget_api import _verify_telegram_init_data
+
+    bot_token = "123456789:ABCDEF_TEST_BOT_TOKEN_12345"
+    monkeypatch.setenv("BOT_TOKEN", bot_token)
+
+    now = int(time.time())
+    user_str = json.dumps({"id": 77777, "first_name": "TestUser"}, separators=(",", ":"))
+
+    # Valid recent initData
+    params = {
+        "auth_date": str(now),
+        "query_id": "AAHdF6IQAAAAAN0XohDhrOrc",
+        "user": user_str,
+    }
+    check_str = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
+    secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+    calc_hash = hmac.new(secret_key, check_str.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    init_data = f"auth_date={params['auth_date']}&query_id={params['query_id']}&user={user_str}&hash={calc_hash}"
+    assert _verify_telegram_init_data(init_data) == 77777
+
+    # Expired initData (> 24h old replay attack)
+    old_time = now - 90000
+    params_old = {
+        "auth_date": str(old_time),
+        "query_id": "AAHdF6IQAAAAAN0XohDhrOrc",
+        "user": user_str,
+    }
+    check_str_old = "\n".join(f"{k}={v}" for k, v in sorted(params_old.items()))
+    calc_hash_old = hmac.new(secret_key, check_str_old.encode("utf-8"), hashlib.sha256).hexdigest()
+    expired_init_data = f"auth_date={old_time}&query_id={params_old['query_id']}&user={user_str}&hash={calc_hash_old}"
+    assert _verify_telegram_init_data(expired_init_data) is None
+

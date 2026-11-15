@@ -988,6 +988,13 @@ def limit_warning(user_id: int, day: datetime.date, before: float, after: float)
 
 
 # --- Экспорт в Excel ---
+def _sanitize_excel_cell(val):
+    """Предотвращает Formula Injection (CSV Injection) в Excel."""
+    if isinstance(val, str) and val and val[0] in ("=", "+", "-", "@"):
+        return "'" + val
+    return val
+
+
 def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.BytesIO:
     if target_month is None:
         target_month = today_date()
@@ -1019,13 +1026,13 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.By
         shown = mand[:9]
         rest = mand[9:]
         for idx, item in enumerate(shown):
-            ws[f"A{8 + idx}"] = item["name"]
+            ws[f"A{8 + idx}"] = _sanitize_excel_cell(item["name"])
             ws[f"B{8 + idx}"] = item["amount"]
         ws["A17"] = f"Остальные обязательные ({len(rest)} шт.)"
         ws["B17"] = sum(r["amount"] for r in rest)
     else:
         for idx, item in enumerate(mand):
-            ws[f"A{8 + idx}"] = item["name"]
+            ws[f"A{8 + idx}"] = _sanitize_excel_cell(item["name"])
             ws[f"B{8 + idx}"] = item["amount"]
 
     for row_idx in range(6, 37):
@@ -1070,7 +1077,7 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.By
                     parts.append(f"{cat} ({comm}): {amt_str}")
                 else:
                     parts.append(f"{cat}: {amt_str}")
-            ws[f"H{row_idx}"] = " | ".join(parts)
+            ws[f"H{row_idx}"] = _sanitize_excel_cell(" | ".join(parts))
         elif start_d <= cur_date < t_today:
             ws[f"G{row_idx}"] = 0
             ws[f"H{row_idx}"] = "Без трат"

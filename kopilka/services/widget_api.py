@@ -125,6 +125,16 @@ def _verify_telegram_init_data(init_data: str) -> int | None:
             return None
         if not bot_token:
             return None
+
+        # Защита от replay-атак: проверяем время жизни init_data (максимум 24 часа)
+        auth_date_raw = parsed.get("auth_date")
+        if not auth_date_raw or not str(auth_date_raw).isdigit():
+            return None
+        auth_date = int(auth_date_raw)
+        now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        if abs(now_ts - auth_date) > 86400:
+            return None
+
         recv_hash = parsed.pop("hash", "")
         if not recv_hash:
             return None
@@ -399,6 +409,7 @@ async def handle_delete_expense(request: web.Request) -> web.Response:
     try:
         eid = int(exp_id)
         with db() as conn:
+            conn.execute("DELETE FROM savings_topups WHERE expense_id = ? AND user_id = ?", (eid, user_id))
             conn.execute("DELETE FROM expenses WHERE id = ? AND user_id = ?", (eid, user_id))
         return web.json_response({"ok": True, "deleted_id": eid, "summary": get_widget_summary_data(user_id)}, headers=_cors_headers())
     except Exception as e:
@@ -728,6 +739,7 @@ async def handle_get_shortcuts(request: web.Request) -> web.Response:
 <html lang="ru">
 <head>
   <meta charset="utf-8">
+  <meta name="referrer" content="no-referrer">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Быстрые команды iOS • Копилка</title>
   <style>
@@ -794,6 +806,7 @@ async def handle_get_kwgt(request: web.Request) -> web.Response:
 <html lang="ru">
 <head>
   <meta charset="utf-8">
+  <meta name="referrer" content="no-referrer">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Виджеты Android • Копилка</title>
   <style>
@@ -882,7 +895,8 @@ async def handle_auth_login(request: web.Request) -> web.Response:
         {"ok": True, "token": token, "user_id": user_id, "summary": get_widget_summary_data(user_id)},
         headers=_cors_headers(),
     )
-    resp.set_cookie("kopilka_token", token, max_age=31536000, path="/", samesite="Lax")
+    is_https = request.scheme == "https" or request.headers.get("X-Forwarded-Proto") == "https" or "bothost.tech" in request.host
+    resp.set_cookie("kopilka_token", token, max_age=31536000, path="/", samesite="Lax", httponly=True, secure=is_https)
     return resp
 
 
@@ -991,6 +1005,7 @@ async def handle_webapp(request: web.Request) -> web.Response:
 <html lang="ru">
 <head>
   <meta charset="utf-8">
+  <meta name="referrer" content="no-referrer">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#0f172a">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -1599,6 +1614,19 @@ async def handle_webapp(request: web.Request) -> web.Response:
       tg.expand();
     }}
 
+    function escapeHtml(str) {{
+      return String(str || '').replace(/[&<>"']/g, function(m) {{
+        switch (m) {{
+          case '&': return '&amp;';
+          case '<': return '&lt;';
+          case '>': return '&gt;';
+          case '"': return '&quot;';
+          case "'": return '&#39;';
+          default: return m;
+        }}
+      }});
+    }}
+
     if ("serviceWorker" in navigator) {{
       navigator.serviceWorker.register("/sw.js").catch(() => {{}});
     }}
@@ -1704,13 +1732,17 @@ async def handle_webapp(request: web.Request) -> web.Response:
       }} else {{
         box.innerHTML = data.recent_expenses.map(e => {{
           const comm = (e.comment || "").trim();
+          const safeCat = escapeHtml(e.category || "");
+          const safeComm = escapeHtml(comm);
+          const safeAmt = escapeHtml(e.amount_fmt || "");
           const itemDesc = (comm && comm.toLowerCase() !== (e.category || "").toLowerCase())
-            ? `<span class="exp-comm">${{comm}}</span> <span style="color: var(--hint);">· ${{e.category}}</span>`
-            : `<span style="color: var(--hint);">${{e.category}}</span>`;
+            ? `<span class="exp-comm">${{safeComm}}</span> <span style="color: var(--hint);">· ${{safeCat}}</span>`
+            : `<span style="color: var(--hint);">${{safeCat}}</span>`;
+          const safeId = parseInt(e.id, 10) || 0;
           return `
             <div class="exp-item">
-              <div class="exp-info"><b>${{e.amount_fmt}}</b> • ${{itemDesc}}</div>
-              <div class="exp-del" onclick="deleteExpense(${{e.id}})">✕</div>
+              <div class="exp-info"><b>${{safeAmt}}</b> • ${{itemDesc}}</div>
+              <div class="exp-del" onclick="deleteExpense(${{safeId}})">✕</div>
             </div>
           `;
         }}).join("");
@@ -1832,8 +1864,8 @@ async def handle_webapp(request: web.Request) -> web.Response:
       }}
       smartPreview.style.display = "flex";
       const amtStr = parsedAmount ? `${{Math.round(parsedAmount * 100) / 100}} ₽` : "… ₽";
-      const itemStr = parsedItem ? ` • ${{parsedItem}}` : "";
-      previewBadge.innerHTML = `✨ <b>${{amtStr}}</b>${{itemStr}} <span style="color: var(--hint);">· ${{selectedCat}}</span>`;
+      const itemStr = parsedItem ? ` • ${{escapeHtml(parsedItem)}}` : "";
+      previewBadge.innerHTML = `✨ <b>${{amtStr}}</b>${{itemStr}} <span style="color: var(--hint);">· ${{escapeHtml(selectedCat)}}</span>`;
     }}
 
     const inpSmart = document.getElementById("inpSmart");
@@ -1993,7 +2025,9 @@ async def handle_webapp(request: web.Request) -> web.Response:
         const previewBadge = document.getElementById("previewBadge");
         smartPreview.style.display = "flex";
         const label = p.method === "transfer" ? "💳 Перевод" : (p.method === "note" ? "📝 Запись" : (p.method === "store_app" ? "📱 Покупка" : "✅ Распознано"));
-        previewBadge.innerHTML = `${{label}}: <b>${{p.amount}} ₽</b> · ${{p.comment || p.category}}`;
+        const safeCommOrCat = escapeHtml(p.comment || p.category || "");
+        const safeAmt = escapeHtml(String(p.amount || 0));
+        previewBadge.innerHTML = `${{label}}: <b>${{safeAmt}} ₽</b> · ${{safeCommOrCat}}`;
         setTimeout(() => {{ smartPreview.style.display = "none"; }}, 4000);
         if (data.summary) {{
           renderSummary(data.summary);
@@ -2119,9 +2153,10 @@ async def handle_webapp(request: web.Request) -> web.Response:
 </body>
 </html>
 """
-    resp = web.Response(text=html, content_type="text/html")
+    resp = web.Response(text=html, content_type="text/html", headers={"Referrer-Policy": "no-referrer"})
     if active_token:
-        resp.set_cookie("kopilka_token", active_token, max_age=31536000, path="/", samesite="Lax")
+        is_https = request.scheme == "https" or request.headers.get("X-Forwarded-Proto") == "https" or "bothost.tech" in request.host
+        resp.set_cookie("kopilka_token", active_token, max_age=31536000, path="/", samesite="Lax", httponly=True, secure=is_https)
     return resp
 
 
