@@ -600,8 +600,8 @@ def _month_limit_series_dynamic(
     expenses_by_day: dict,
     today_day: int = None,
 ) -> dict:
-    """Динамический перерасчёт лимита: перерасход или экономия автоматически
-    перераспределяются поровну на оставшиеся дни месяца."""
+    """Динамический перерасчёт лимита: перерасход автоматически уменьшает
+    дневной бюджет оставшихся дней месяца."""
     accounted_budget = base * max(1, n - first_day + 1)
     rem_budget = accounted_budget
     out = {}
@@ -614,8 +614,13 @@ def _month_limit_series_dynamic(
             lim = snaps[dn]
         elif today_day is not None and dn > today_day:
             if future_lim is None:
+                today_spent = expenses_by_day.get(today_day, 0.0)
+                today_lim = out.get(today_day, base)
                 rem_days = max(1, n - today_day)
-                future_lim = max(0.0, rem_budget / rem_days)
+                if today_spent > today_lim:
+                    future_lim = max(0.0, (rem_budget - today_spent) / rem_days)
+                else:
+                    future_lim = today_lim
             lim = future_lim
         else:
             rem_days = max(1, n - dn + 1)
@@ -625,10 +630,6 @@ def _month_limit_series_dynamic(
 
         if today_day is None or dn < today_day:
             rem_budget -= expenses_by_day.get(dn, 0.0)
-        elif dn == today_day:
-            rem_budget -= expenses_by_day.get(dn, 0.0)
-            rem_days = max(1, n - today_day)
-            future_lim = max(0.0, rem_budget / rem_days)
 
     return {k: v for k, v in out.items() if first_day <= k <= last_day}
 
@@ -719,6 +720,10 @@ def upsert_mandatory(user_id: int, name: str, amount: float) -> bool:
 
 def calc_change_pool(user_id: int, through_date: datetime.date) -> float:
     """Банк сдачи: лимит за все дни периода по through_date включительно минус траты."""
+    if get_setting(user_id, "recalc_mode", "0") == "1":
+        # В режиме динамического перерасчёта банка сдачи нет — перерасход и экономия
+        # автоматически закладываются в дневной бюджет оставшихся дней.
+        return 0.0
     period_start = get_period_start(user_id, through_date)
     if period_start > through_date:
         return 0.0
@@ -1244,7 +1249,17 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
         exp_text = "_Пока нет записанных трат_"
 
     if info.get("recalc_mode"):
-        rem_days = info["days_in_month"] - target_date.day
+        month_prefix = f"{target_date.year:04d}-{target_date.month:02d}-"
+        with db() as conn:
+            m_row = conn.execute(
+                "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses "
+                "WHERE user_id = ? AND spent_date LIKE ?",
+                (user_id, month_prefix + "%"),
+            ).fetchone()
+        month_spent = float(m_row["total"]) if m_row else 0.0
+        month_remaining = max(0.0, info["available"] - month_spent)
+        rem_days = max(0, info["days_in_month"] - target_date.day)
+        days_left = rem_days if rem < 0 else max(1, info["days_in_month"] - target_date.day + 1)
         tomorrow_limit = 0.0
         if target_date == today_date() and rem_days > 0:
             tomorrow_date = target_date + datetime.timedelta(days=1)
@@ -1259,16 +1274,10 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
                     advice = "💡 Это последний день месяца. Завтра начнётся новый бюджетный период."
             elif rem > 0:
                 status_line = f"✅ *Остаток на сегодня:* +{fmt_money(rem)}"
-                if rem_days > 0:
-                    advice = f"🔄 *Бюджет пересчитан:* остаток перераспределён на оставшиеся {rem_days} дн. — новый лимит *{fmt_money(tomorrow_limit)}/день*."
-                else:
-                    advice = f"🎉 Месяц завершён с экономией {fmt_money(rem)}!"
+                advice = ""
             else:
                 status_line = "✅ *Лимит потрачен ровно:* 0 ₽ остатка"
-                if rem_days > 0:
-                    advice = f"🔄 *Бюджет в графике:* лимит на оставшиеся {rem_days} дн. остаётся *{fmt_money(tomorrow_limit)}/день*."
-                else:
-                    advice = "💡 Месяц завершён ровно по плану!"
+                advice = ""
         else:
             if rem < 0:
                 status_line = f"⚠️ *ЛИМИТ ПРЕВЫШЕН на {fmt_money(-rem)}!*"
@@ -1276,6 +1285,8 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
             else:
                 status_line = f"✅ *Остаток за день:* +{fmt_money(rem)}"
                 advice = "💡 Сэкономленные средства перешли в бюджет следующих дней."
+
+        balance_line = f"📊 *Остаток бюджета на месяц:* {fmt_money(month_remaining)} ({days_left} дн.)\n"
     else:
         if rem < 0:
             status_line = f"⚠️ *ЛИМИТ ПРЕВЫШЕН на {fmt_money(-rem)}!*"
@@ -1287,11 +1298,11 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
             status_line = f"✅ *Остаток сдачи за день:* +{fmt_money(rem)}"
             advice = f"💡 Сдача (+{fmt_money(rem)}) добавлена в ваш банк сдачи."
 
+        balance_line = f"🪙 *Банк сдачи:* {fmt_money(change_pool)}\n"
+
     base_daily_income = info["income"] / info["days_in_month"] if info["days_in_month"] else 0.0
 
-    recalc_line = ""
-    if info.get("recalc_mode") and target_date == today_date() and rem_days > 0:
-        recalc_line = f"🔄 *Лимит с завтра:* {fmt_money(tomorrow_limit)}/день ({rem_days} дн.)\n"
+    advice_block = f"{advice}\n\n" if advice else ""
 
     text = (
         f"{title}\n\n"
@@ -1299,9 +1310,8 @@ def build_day_report(user_id: int, target_date: datetime.date, extra_rows=None):
         f"🏦 *Доход за день (расчётный):* +{fmt_money(base_daily_income)}\n"
         f"💸 *Потрачено за день:* {fmt_money(spent)} из {fmt_money(info['daily_limit'])}\n"
         f"{status_line}\n\n"
-        f"{advice}\n\n"
-        f"{recalc_line}"
-        f"🪙 *Банк сдачи:* {fmt_money(change_pool)}\n"
+        f"{advice_block}"
+        f"{balance_line}"
         f"💰 *Копилка (всего):* {fmt_money(info['piggy_total'])}"
     )
     if info["available"] < 0:
@@ -2067,7 +2077,19 @@ def build_week_summary(user_id: int, week_start: datetime.date):
         for i, r in enumerate(top, 1):
             lines.append(f"{i}. {esc(r['category'])} — {fmt_money(r['total'])}")
     info = get_budget_info(user_id, week_end)
-    lines.append(f"\n🪙 *Банк сдачи на {dm(week_end)}:* {fmt_money(calc_change_pool(user_id, week_end))}")
+    if info.get("recalc_mode"):
+        month_prefix = f"{week_end.year:04d}-{week_end.month:02d}-"
+        with db() as conn:
+            m_row = conn.execute(
+                "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses "
+                "WHERE user_id = ? AND spent_date LIKE ?",
+                (user_id, month_prefix + "%"),
+            ).fetchone()
+        month_spent = float(m_row["total"]) if m_row else 0.0
+        month_remaining = max(0.0, info["available"] - month_spent)
+        lines.append(f"\n📊 *Остаток бюджета на месяц:* {fmt_money(month_remaining)}")
+    else:
+        lines.append(f"\n🪙 *Банк сдачи на {dm(week_end)}:* {fmt_money(calc_change_pool(user_id, week_end))}")
     lines.append(f"💰 *Копилка (всего):* {fmt_money(info['piggy_total'])}")
     return "\n".join(lines)
 
@@ -2406,12 +2428,11 @@ async def show_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines.append(f"\n💸 *Всего потрачено (с учётом обязательных):* *{fmt_money(total_spent)}*")
     if info.get("recalc_mode"):
-        rem_days = info["days_in_month"] - now_d.day
+        month_remaining = max(0.0, info["available"] - expenses_spent)
+        lines.append(f"📊 *Остаток бюджета на месяц:* {fmt_money(month_remaining)}")
         lines.append(f"🎯 *Лимит на сегодня:* {fmt_money(info['daily_limit'])}")
-        if rem_days > 0:
-            tomorrow_limit = get_budget_info(user_id, now_d + datetime.timedelta(days=1))["daily_limit"]
-            lines.append(f"🔄 *Лимит с завтра:* {fmt_money(tomorrow_limit)}/день ({rem_days} дн.)")
-    lines.append(f"🪙 *Банк сдачи:* {fmt_money(change_pool)}")
+    else:
+        lines.append(f"🪙 *Банк сдачи:* {fmt_money(change_pool)}")
     lines.append(f"💰 *Копилка (всего):* {fmt_money(info['piggy_total'])}")
 
     if top_rows:
@@ -2606,7 +2627,10 @@ def build_month_detail(user_id: int, first_day: datetime.date):
     lines.append("")
     lines.append(f"💸 *Потрачено:* {fmt_money(s['spent'])} из {fmt_money(s['total_limit'])} лимита")
     pool = s["change_pool"]
-    if pool >= 0:
+    if info.get("recalc_mode"):
+        month_rem = max(0.0, info["available"] - s["spent"])
+        lines.append(f"📊 *Остаток бюджета на месяц:* {fmt_money(month_rem)}")
+    elif pool >= 0:
         lines.append(f"🪙 *Итог:* сдача +{fmt_money(pool)}")
     else:
         lines.append(f"🪙 *Итог:* перерасход −{fmt_money(-pool)}")
@@ -3473,20 +3497,36 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     info = get_budget_info(user_id, today)
     spent = day_spent(user_id, today)
     rem = max(0.0, info["daily_limit"] - spent)
-    pool = calc_change_pool(user_id, today)
     piggy = info["piggy_total"]
+
+    if info.get("recalc_mode"):
+        month_prefix = f"{today.year:04d}-{today.month:02d}-"
+        with db() as conn:
+            m_row = conn.execute(
+                "SELECT COALESCE(SUM(amount), 0) AS total FROM expenses "
+                "WHERE user_id = ? AND spent_date LIKE ?",
+                (user_id, month_prefix + "%"),
+            ).fetchone()
+        month_spent = float(m_row["total"]) if m_row else 0.0
+        month_rem = max(0.0, info["available"] - month_spent)
+        second_metric_line = f"• Остаток на месяц: *{fmt_money(month_rem)}*"
+        second_metric_desc = f"Остаток мес: {fmt_money(month_rem)}"
+    else:
+        pool = calc_change_pool(user_id, today)
+        second_metric_line = f"• Банк сдачи: *{fmt_money(pool)}*"
+        second_metric_desc = f"Сдача: {fmt_money(pool)}"
 
     summary_text = (
         f"📊 *Мой бюджет на {today.strftime('%d.%m')}:*\n"
         f"• Остаток на сегодня: *{fmt_money(rem)}* (из {fmt_money(info['daily_limit'])})\n"
-        f"• Банк сдачи: *{fmt_money(pool)}*\n"
+        f"{second_metric_line}\n"
         f"• Накоплено в копилке: *{fmt_money(piggy)}*"
     )
     results.append(
         InlineQueryResultArticle(
             id="status",
             title=f"📊 Остаток на сегодня: {fmt_money(rem)}",
-            description=f"Лимит: {fmt_money(info['daily_limit'])} | Сдача: {fmt_money(pool)} | Копилка: {fmt_money(piggy)}",
+            description=f"Лимит: {fmt_money(info['daily_limit'])} | {second_metric_desc} | Копилка: {fmt_money(piggy)}",
             input_message_content=InputTextMessageContent(summary_text, parse_mode="Markdown"),
         )
     )
