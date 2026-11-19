@@ -1073,10 +1073,9 @@ def update_excel_file(user_id: int, target_month: datetime.date = None) -> io.By
             parts = []
             for amt, cat, comm in items:
                 amt_str = f"{int(amt) if float(amt).is_integer() else amt}₽"
-                if comm and comm.lower() != cat.lower():
-                    parts.append(f"{cat} ({comm}): {amt_str}")
-                else:
-                    parts.append(f"{cat}: {amt_str}")
+                # Записываем по факту то, что ввёл пользователь (комментарий/название покупки, если есть, иначе категорию)
+                label = cap(comm.strip() if comm and comm.strip() else cat.strip())
+                parts.append(f"{label}: {amt_str}")
             ws[f"H{row_idx}"] = _sanitize_excel_cell(" | ".join(parts))
         elif start_d <= cur_date < t_today:
             ws[f"G{row_idx}"] = 0

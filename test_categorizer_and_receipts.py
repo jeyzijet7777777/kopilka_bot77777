@@ -531,9 +531,9 @@ def test_history_and_excel_show_item_description(clean_db):
     buf = bot.update_excel_file(uid)
     wb = openpyxl.load_workbook(buf)
     ws = wb.active
-    # Проверяем, что в колонке H есть детализация
+    # Проверяем, что в колонке H записано по факту то, что введено (Помело, а не Продукты)
     h_vals = [ws[f"H{r}"].value for r in range(6, 37) if ws[f"H{r}"].value]
-    assert any("Продукты (Помело): 280₽" in str(v) for v in h_vals)
+    assert any("Помело: 280₽" in str(v) for v in h_vals)
 
 
 def test_extract_russian_textual_and_relative_dates():
